@@ -20,7 +20,7 @@ module SmsEmulator
     attr_accessor :vdp, :controller, :psg, :io_cycle
 
     def load_rom(data)
-      @cartridge = data.dup
+      @cartridge = strip_copier_header(data)
       @mapper = [0, 0, 1, 2]
       @bank_count = [(@cartridge.length + 0x3FFF) / 0x4000, 1].max
       sync_bank_offsets
@@ -107,6 +107,13 @@ module SmsEmulator
     end
 
     private
+
+    def strip_copier_header(data)
+      bytes = data.dup
+      return bytes unless bytes.length > 0x4000 && (bytes.length % 0x4000) == 512
+
+      bytes[512..] || []
+    end
 
     def read_rom(addr)
       return @rom[addr] || 0 unless @cartridge && @cartridge.length > ROM_SIZE

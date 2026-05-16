@@ -42,7 +42,7 @@ RSpec.describe SmsEmulator::PSG do
 
   it 'renders bounded mixed samples' do
     psg = described_class.new
-    psg.write(0x80 | 0x01)
+    psg.write(0x80 | 0x08)
     psg.write(0x10)
     psg.write(0x90 | 0x00)
 
@@ -50,6 +50,20 @@ RSpec.describe SmsEmulator::PSG do
 
     expect(samples.length).to eq(32)
     expect(samples.all? { |sample| sample.between?(-1.0, 1.0) }).to be true
+  end
+
+  it 'renders frame samples by replaying writes at their frame cycle' do
+    psg = described_class.new
+    psg.write(0x80 | 0x08)
+    psg.write(0x00)
+    psg.begin_frame
+    psg.write(0x90 | 0x0F, cycle: 0)
+    psg.write(0x90 | 0x00, cycle: 100)
+
+    samples = psg.render_frame_samples(64, 200)
+
+    expect(samples[0, 32].map(&:abs).sum).to be < 0.001
+    expect(samples[32, 32].map(&:abs).sum).to be > 0.001
   end
 end
 

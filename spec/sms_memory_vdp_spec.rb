@@ -28,6 +28,19 @@ RSpec.describe SmsEmulator::Memory do
     expect(memory.read_byte(0xFFFF)).to eq(0x82)
   end
 
+  it 'strips 512-byte copier headers from cartridge images' do
+    data = Array.new(512, 0) + Array.new(0x8000, 0)
+    data[512] = 0xED
+    data[513] = 0x56
+
+    memory = described_class.new
+    memory.load_rom(data)
+
+    expect(memory.cartridge.length).to eq(0x8000)
+    expect(memory.read_byte(0)).to eq(0xED)
+    expect(memory.read_byte(1)).to eq(0x56)
+  end
+
   it 'routes VDP ports through the memory bus' do
     vdp = SmsEmulator::VDP.new
     memory = described_class.new(vdp)

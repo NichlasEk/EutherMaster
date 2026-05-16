@@ -138,6 +138,7 @@ module SmsEmulator
       cycles_this_frame = 0
       steps_this_frame = 0
       @vdp.begin_frame
+      @psg.begin_frame
 
       262.times do |scanline|
         target_cycles = (scanline + 1) * CYCLES_PER_SCANLINE

@@ -32,13 +32,25 @@ module SmsEmulator
       @noise_phase = 0.0
       @noise_counter_output = -1.0
       @noise_output = -1.0
+      @frame_start_state = capture_state
+      @frame_writes = []
+    end
+
+    def begin_frame
+      @frame_start_state = capture_state
+      @frame_writes = []
     end
 
     def write(value, port: nil, cycle: nil)
       value &= 0xFF
       @writes += 1
       log_write(value, port, cycle)
+      @frame_writes << { cycle: cycle.to_i, value: value } if @frame_writes
 
+      apply_write(value)
+    end
+
+    def apply_write(value)
       if (value & 0x80) != 0
         @latched_channel = (value >> 5) & 0x03
         @latched_volume = (value & 0x10) != 0
@@ -102,30 +114,88 @@ module SmsEmulator
       samples = Array.new(count, 0.0)
 
       count.times do |index|
-        mixed = 0.0
-
-        TONE_CHANNELS.times do |channel|
-          volume = channel_volume(channel)
-          next if volume <= 0.0
-
-          frequency = tone_frequency(channel)
-          next if frequency <= 0.0
-
-          @phases[channel] += frequency / sample_rate
-          @phases[channel] -= 1.0 while @phases[channel] >= 1.0
-          mixed += (@phases[channel] < 0.5 ? 0.0 : 1.0) * volume
-        end
-
-        noise_volume = channel_volume(3)
-        if noise_volume > 0.0
-          advance_noise(sample_rate)
-          mixed += (@noise_output.positive? ? 1.0 : 0.0) * noise_volume
-        end
-
-        samples[index] = ((mixed / CHANNELS) - 0.5).clamp(-1.0, 1.0)
+        samples[index] = render_sample(sample_rate)
       end
 
       samples
+    end
+
+    def render_frame_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
+      renderer = self.class.new
+      renderer.restore_state(@frame_start_state || capture_state)
+      writes = @frame_writes || []
+      write_index = 0
+      samples = Array.new(count, 0.0)
+
+      count.times do |sample_index|
+        cycle = (sample_index * frame_cycles / count.to_f).floor
+        while write_index < writes.length && writes[write_index][:cycle] <= cycle
+          renderer.apply_write(writes[write_index][:value])
+          write_index += 1
+        end
+        samples[sample_index] = renderer.render_sample(sample_rate)
+      end
+
+      restore_render_state(renderer.capture_state)
+      samples
+    end
+
+    protected
+
+    def restore_state(state)
+      @tone_periods = state[:tone_periods].dup
+      @volumes = state[:volumes].dup
+      @noise_control = state[:noise_control]
+      @noise_reload = state[:noise_reload]
+      @latched_channel = state[:latched_channel]
+      @latched_volume = state[:latched_volume]
+      @phases = state[:phases].dup
+      @noise_lfsr = state[:noise_lfsr]
+      @noise_phase = state[:noise_phase]
+      @noise_counter_output = state[:noise_counter_output]
+      @noise_output = state[:noise_output]
+      @frame_start_state = capture_state
+      @frame_writes = []
+    end
+
+    def render_sample(sample_rate)
+      mixed = 0.0
+
+      TONE_CHANNELS.times do |channel|
+        volume = channel_volume(channel)
+        next if volume <= 0.0
+
+        frequency = tone_frequency(channel)
+        next if frequency <= 0.0 || frequency >= sample_rate / 2.0
+
+        @phases[channel] += frequency / sample_rate
+        @phases[channel] -= 1.0 while @phases[channel] >= 1.0
+        mixed += (@phases[channel] < 0.5 ? 0.0 : 1.0) * volume
+      end
+
+      noise_volume = channel_volume(3)
+      if noise_volume > 0.0
+        advance_noise(sample_rate)
+        mixed += (@noise_output.positive? ? 1.0 : 0.0) * noise_volume
+      end
+
+      (mixed / CHANNELS).clamp(-1.0, 1.0)
+    end
+
+    def capture_state
+      {
+        tone_periods: @tone_periods.dup,
+        volumes: @volumes.dup,
+        noise_control: @noise_control,
+        noise_reload: @noise_reload,
+        latched_channel: @latched_channel,
+        latched_volume: @latched_volume,
+        phases: @phases.dup,
+        noise_lfsr: @noise_lfsr,
+        noise_phase: @noise_phase,
+        noise_counter_output: @noise_counter_output,
+        noise_output: @noise_output
+      }
     end
 
     private
@@ -177,5 +247,20 @@ module SmsEmulator
         @noise_lfsr = (@noise_lfsr >> 1) | (feedback << 15)
       end
     end
+
+    def restore_render_state(state)
+      @tone_periods = state[:tone_periods].dup
+      @volumes = state[:volumes].dup
+      @noise_control = state[:noise_control]
+      @noise_reload = state[:noise_reload]
+      @latched_channel = state[:latched_channel]
+      @latched_volume = state[:latched_volume]
+      @phases = state[:phases].dup
+      @noise_lfsr = state[:noise_lfsr]
+      @noise_phase = state[:noise_phase]
+      @noise_counter_output = state[:noise_counter_output]
+      @noise_output = state[:noise_output]
+    end
+
   end
 end
