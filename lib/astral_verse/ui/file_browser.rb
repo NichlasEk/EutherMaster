@@ -3,13 +3,13 @@ require 'gosu'
 module AstralVerse
   module UI
     class FileBrowser < Gosu::Window
-      WIDTH = 1400
-      HEIGHT = 900
-      LINE_HEIGHT = 36
-      HEADER_HEIGHT = 100
-      FOOTER_HEIGHT = 60
-      MARGIN = 40
-      SIDEBAR_WIDTH = 260
+      WIDTH = 1600
+      HEIGHT = 1000
+      LINE_HEIGHT = 48
+      HEADER_HEIGHT = 120
+      FOOTER_HEIGHT = 70
+      MARGIN = 50
+      SIDEBAR_WIDTH = 300
 
       ROM_EXTENSIONS = ['.sms', '.gg', '.bin', '.rom'].freeze
 
@@ -54,11 +54,11 @@ module AstralVerse
         @key_repeat_delay = 30   # ms before repeat starts
         @key_repeat_interval = 15 # ms between repeats when held
 
-        @font_title = Gosu::Font.new(32, name: "Courier New")
-        @font_path   = Gosu::Font.new(16, name: "Courier New")
-        @font_item   = Gosu::Font.new(18, name: "Courier New")
-        @font_small  = Gosu::Font.new(13, name: "Courier New")
-        @font_button = Gosu::Font.new(16, name: "Courier New")
+        @font_title = Gosu::Font.new(42, name: "Courier New")
+        @font_path   = Gosu::Font.new(20, name: "Courier New")
+        @font_item   = Gosu::Font.new(24, name: "Courier New")
+        @font_small  = Gosu::Font.new(16, name: "Courier New")
+        @font_button = Gosu::Font.new(18, name: "Courier New")
         @bg_anim = 0.0
 
         @bookmarks = {
@@ -177,14 +177,14 @@ module AstralVerse
         Gosu.draw_rect(0, 0, SIDEBAR_WIDTH, HEIGHT, COLORS[:sidebar])
 
         title = "► Quick Paths"
-        @font_small.draw_text(title, 15, 15, 1, 1, 1, COLORS[:accent])
-        Gosu.draw_rect(10, 35, SIDEBAR_WIDTH - 20, 1, COLORS[:border])
+        @font_small.draw_text(title, 20, 20, 1, 1, 1, COLORS[:accent])
+        Gosu.draw_rect(15, 48, SIDEBAR_WIDTH - 30, 2, COLORS[:border])
 
-        y = 50
+        y = 65
         @bookmarks.each_with_index do |(label, path), i|
           color = (i == @bookmark_selected) ? COLORS[:highlight] : COLORS[:dim_text]
           @font_small.draw_text("📁 #{label}", 20, y, 1, 1, 1, color)
-          y += 24
+          y += 30
         end
 
         Gosu.draw_rect(SIDEBAR_WIDTH, 0, 2, HEIGHT, COLORS[:border])
@@ -199,7 +199,7 @@ module AstralVerse
 
         # Current path
         path_display = @current_dir.length > 70 ? "..." + @current_dir[-67..-1] : @current_dir
-        @font_path.draw_text("📂 #{path_display}", SIDEBAR_WIDTH + 20, 55, 1, 1, 1, COLORS[:dim_text])
+        @font_path.draw_text("📂 #{path_display}", SIDEBAR_WIDTH + 25, 72, 1, 1, 1, COLORS[:dim_text])
 
         Gosu.draw_rect(SIDEBAR_WIDTH, HEADER_HEIGHT - 2, WIDTH - SIDEBAR_WIDTH, 2, COLORS[:border])
       end
@@ -224,14 +224,14 @@ module AstralVerse
         end
 
         # Column headers
-        @font_small.draw_text("Name", list_left + 10, list_top + 5, 1, 1, 1, COLORS[:dim_text])
-        @font_small.draw_text("Size", list_left + list_width - 120, list_top + 5, 1, 1, 1, COLORS[:dim_text])
-        @font_small.draw_text("Type", list_left + list_width - 220, list_top + 5, 1, 1, 1, COLORS[:dim_text])
-        Gosu.draw_rect(list_left + 10, list_top + 22, list_width - 20, 1, COLORS[:border])
+        @font_small.draw_text("Name", list_left + 15, list_top + 8, 1, 1, 1, COLORS[:dim_text])
+        @font_small.draw_text("Size", list_left + list_width - 140, list_top + 8, 1, 1, 1, COLORS[:dim_text])
+        @font_small.draw_text("Type", list_left + list_width - 260, list_top + 8, 1, 1, 1, COLORS[:dim_text])
+        Gosu.draw_rect(list_left + 15, list_top + 32, list_width - 30, 1, COLORS[:border])
 
         (start_idx...end_idx).each do |i|
           entry = @entries[i]
-          y = list_top + 28 + (i - start_idx) * LINE_HEIGHT
+          y = list_top + 40 + (i - start_idx) * LINE_HEIGHT
           x = list_left + 10
           w = list_width - 20
 
@@ -257,19 +257,19 @@ module AstralVerse
                        end
 
           display_name = truncate_name(entry[:name], 45)
-          @font_item.draw_text("#{icon} #{display_name}", x + 5, y + 5, 1, 1, 1, name_color)
+           @font_item.draw_text("#{icon} #{display_name}", x + 8, y + 10, 1, 1, 1, name_color)
 
-          # Type
-          type_str = case entry[:type]
-                     when :dir then "Folder"
-                     when :parent then "Parent"
-                     when :rom then "ROM"
-                     else "File"
-                     end
-          @font_small.draw_text(type_str, list_left + list_width - 220, y + 8, 1, 1, 1, COLORS[:dim_text])
+           # Type
+           type_str = case entry[:type]
+                      when :dir then "Folder"
+                      when :parent then "Parent"
+                      when :rom then "ROM"
+                      else "File"
+                      end
+           @font_small.draw_text(type_str, list_left + list_width - 260, y + 14, 1, 1, 1, COLORS[:dim_text])
 
-          # Size
-          @font_small.draw_text(entry[:size], list_left + list_width - 120, y + 8, 1, 1, 1, COLORS[:dim_text])
+           # Size
+           @font_small.draw_text(entry[:size], list_left + list_width - 140, y + 14, 1, 1, 1, COLORS[:dim_text])
         end
 
         # Scroll indicator
@@ -299,12 +299,12 @@ module AstralVerse
 
         # Left side: controls
         left_hint = "🖱️ Click = Select | Double-Click = Open | ESC = Cancel"
-        @font_small.draw_text(left_hint, 20, y + 15, 1, 1, 1, COLORS[:dim_text])
+        @font_small.draw_text(left_hint, 25, y + 22, 1, 1, 1, COLORS[:dim_text])
 
         # Right side: ROM count
         rom_count = @entries.count { |e| e[:type] == :rom }
         right_text = "#{rom_count} ROM(s) found | ↑↓ Navigate"
-        @font_small.draw_text(right_text, WIDTH - @font_small.text_width(right_text) - 20, y + 15, 1, 1, 1, COLORS[:dim_text])
+        @font_small.draw_text(right_text, WIDTH - @font_small.text_width(right_text) - 25, y + 22, 1, 1, 1, COLORS[:dim_text])
       end
 
       # MOUSE SUPPORT
