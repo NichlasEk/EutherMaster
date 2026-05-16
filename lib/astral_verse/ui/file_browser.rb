@@ -123,7 +123,12 @@ module AstralVerse
 
         # Handle scrollbar dragging
         if @scroll_dragging
-          update_scroll_from_drag(mouse_y)
+          if Gosu.button_down?(Gosu::MsLeft)
+            update_scroll_from_drag(mouse_y)
+          else
+            @scroll_dragging = false
+            puts "[DEBUG] Drag ended - mouse released"
+          end
         end
 
         # Key repeat logic for held arrow keys
@@ -272,29 +277,27 @@ module AstralVerse
            @font_small.draw_text(entry[:size], list_left + list_width - 140, y + 14, 1, 1, 1, COLORS[:dim_text])
         end
 
-        # Scroll indicator - HUGE and EASY TO GRAB
+        # Scroll indicator - wide but not ridiculous (40px)
         if @entries.length > @visible_count
           ratio = @visible_count.to_f / @entries.length
           bar_h = ratio * list_height
           bar_y = list_top + (@scroll.to_f / @entries.length) * list_height
           
-          # MASSIVE scrollbar on the far right edge (80px wide)
-          sb_x = WIDTH - 90
-          @scrollbar_track = { x: sb_x, y: list_top, w: 80, h: list_height }
-          @scrollbar_thumb = { x: sb_x, y: bar_y, w: 80, h: [bar_h, 60].max }
+          # 40px scrollbar, easy to grab but not comical
+          sb_x = WIDTH - 55
+          @scrollbar_track = { x: sb_x, y: list_top, w: 40, h: list_height }
+          @scrollbar_thumb = { x: sb_x, y: bar_y, w: 40, h: [bar_h, 40].max }
           
-          # Draw track - visible background
+          # Draw track
           Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], @scrollbar_track[:h], Gosu::Color.new(255, 50, 40, 80))
-          # Draw border around track
-          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], 3, COLORS[:border])
-          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y] + @scrollbar_track[:h] - 3, @scrollbar_track[:w], 3, COLORS[:border])
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], 2, COLORS[:border])
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y] + @scrollbar_track[:h] - 2, @scrollbar_track[:w], 2, COLORS[:border])
           
-          # Draw thumb - bright glowing color
+          # Draw thumb
           thumb_bg = @scroll_dragging ? Gosu::Color.new(255, 180, 160, 255) : Gosu::Color.new(255, 120, 100, 200)
           Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], @scrollbar_thumb[:h].to_i, thumb_bg)
-          # Thumb border - thick white lines
-          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], 3, Gosu::Color::WHITE)
-          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i + @scrollbar_thumb[:h].to_i - 3, @scrollbar_thumb[:w], 3, Gosu::Color::WHITE)
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], 2, Gosu::Color::WHITE)
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i + @scrollbar_thumb[:h].to_i - 2, @scrollbar_thumb[:w], 2, Gosu::Color::WHITE)
         else
           @scrollbar_track = nil
           @scrollbar_thumb = nil
