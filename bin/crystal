@@ -10,21 +10,12 @@ puts
 loop do
   stone = AstralVerse::ScryingStone.new
 
-  # If there's a cached ROM, load it directly
-  if AstralVerse::LastRelicCache.last_relic
-    begin
-      stone.absorb_codex(AstralVerse::LastRelicCache.last_relic)
-    rescue => e
-      puts "⚠️ Could not load cached relic: #{e.message}"
-    end
-  end
-
   begin
     require_relative '../lib/astral_verse/ui/crystal_window'
     window = AstralVerse::CrystalWindow.new(stone)
     window.show
 
-    # After window closes, check if user wants a new ROM
+    # After window closes, check what user wants
     if window.needs_pick?
       puts "📂 Opening Relic Explorer..."
 
@@ -35,14 +26,17 @@ loop do
 
       if browser.selected_path
         AstralVerse::LastRelicCache.save_relic(browser.selected_path)
-        # Loop will create a new stone with this ROM
-        next
+        next  # Restart loop with new ROM loaded
       else
-        puts "❌ No relic selected. The vault remains sealed."
+        puts "❌ No relic selected."
         break
       end
+    elsif window.needs_start?
+      # Start was clicked but no ROM loaded yet
+      puts "⚠️ No relic armed. Use Open to select one."
+      next
     else
-      # User pressed ESC without requesting new ROM
+      # User pressed ESC without requesting anything
       break
     end
   rescue Interrupt

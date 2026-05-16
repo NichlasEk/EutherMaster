@@ -4,7 +4,7 @@ module AstralVerse
     SHARD_POOL = 0x2000   # 8KB crystal shards (RAM)
     CODEX_SIZE = 0xC000   # 48KB ancient codex (ROM)
 
-    attr_reader :crystal_shards, :ancient_codex
+    attr_reader :crystal_shards, :ancient_codex, :relic_path
 
     def initialize
       @crystal_shards = Array.new(SHARD_POOL, 0)
@@ -19,6 +19,7 @@ module AstralVerse
     end
 
     def inscribe_codex_from_path(path)
+      @relic_path = path
       essence = File.binread(path).bytes
       inscribe_codex(essence)
     end
