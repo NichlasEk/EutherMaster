@@ -489,6 +489,29 @@ module AstralVerse
         @scroll = 0
       end
 
+      def hit_scrollbar?(mx, my)
+        return false unless @scrollbar_track && @scrollbar_thumb
+        track_hit = mx >= @scrollbar_track[:x] && mx <= @scrollbar_track[:x] + @scrollbar_track[:w] &&
+                    my >= @scrollbar_track[:y] && my <= @scrollbar_track[:y] + @scrollbar_track[:h]
+        thumb_hit = mx >= @scrollbar_thumb[:x] && mx <= @scrollbar_thumb[:x] + @scrollbar_thumb[:w] &&
+                    my >= @scrollbar_thumb[:y] && my <= @scrollbar_thumb[:y] + @scrollbar_thumb[:h]
+        track_hit || thumb_hit
+      end
+
+      def update_scroll_from_drag(y)
+        return unless @entries.length > @visible_count
+        list_top = HEADER_HEIGHT + 10
+        list_height = HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT - 20
+        ratio = (y - list_top).to_f / list_height
+        ratio = [ratio, 0.0].max
+        ratio = [ratio, 1.0].min
+        max_scroll = [@entries.length - @visible_count, 0].max
+        @scroll = (ratio * max_scroll).round
+        @scroll = [@scroll, 0].max
+        @scroll = [@scroll, max_scroll].min
+        @selected = @scroll
+      end
+
       def needs_cursor?
         true
       end
