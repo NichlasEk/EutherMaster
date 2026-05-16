@@ -155,19 +155,32 @@ module AstralVerse
     end
 
     class PcmSink
+      MAX_PENDING_CHUNKS = 24
+      CLOSE_SENTINEL = Object.new.freeze
+
       def initialize(sample_rate)
         @sample_rate = sample_rate
         @pid, @io = spawn_sink
+        @queue = Queue.new
+        @closed = false
+        @failed = false
+        @writer_thread = Thread.new { writer_loop }
+        @writer_thread.abort_on_exception = false
       end
 
       def write_samples(samples, gain)
-        return unless @io
+        raise IOError, 'PCM sink closed' if @closed || @failed
 
-        data = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }.pack('s<*')
-        @io.write(data)
+        drop_stale_chunks
+        @queue << [samples, gain]
       end
 
       def close
+        return if @closed
+
+        @closed = true
+        @queue << CLOSE_SENTINEL if @queue
+        @writer_thread&.join(0.25)
         @io&.close
       rescue IOError
         # Already closed.
@@ -185,6 +198,27 @@ module AstralVerse
       end
 
       private
+
+      def writer_loop
+        loop do
+          item = @queue.pop
+          break if item.equal?(CLOSE_SENTINEL)
+
+          samples, gain = item
+          data = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }.pack('s<*')
+          @io.write(data)
+        end
+      rescue IOError, Errno::EPIPE
+        @failed = true
+      end
+
+      def drop_stale_chunks
+        while @queue.length >= MAX_PENDING_CHUNKS
+          @queue.pop(true)
+        end
+      rescue ThreadError
+        nil
+      end
 
       def spawn_sink
         command = if (native = native_sink_command)
