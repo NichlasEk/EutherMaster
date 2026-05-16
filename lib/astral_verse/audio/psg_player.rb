@@ -26,7 +26,7 @@ module AstralVerse
       end
 
       noise = state[:noise]
-      sync_channel(3, @noise_sample, noise[:frequency], noise[:volume], NOISE_GAIN, pitch: false)
+      sync_channel(3, @noise_sample, noise[:frequency], noise[:volume], NOISE_GAIN)
     end
 
     def stop

@@ -15,12 +15,13 @@ module SmsEmulator
       @mapper = [0, 0, 1, 2]
     end
 
-    attr_accessor :vdp, :controller, :psg
+    attr_accessor :vdp, :controller, :psg, :io_cycle
 
     def load_rom(data)
       @cartridge = data.dup
       @mapper = [0, 0, 1, 2]
       @ram.fill(0)
+      sync_mapper_ram
       @rom.fill(0)
       size = [@cartridge.length, ROM_SIZE].min
       @rom[0, size] = @cartridge[0, size]
@@ -77,35 +78,38 @@ module SmsEmulator
     end
 
     def read_io(port)
-      case port & 0xFF
-      when 0x7E
-        @vdp ? @vdp.read_v_counter : 0xFF
-      when 0x7F
-        @vdp ? @vdp.read_h_counter : 0xFF
-      when 0xBE
-        @vdp ? @vdp.read_data : 0xFF
-      when 0xBF
-        @vdp ? @vdp.read_status : 0xFF
-      when 0xDC, 0xDE
-        @controller ? @controller.read_port_a : 0xFF
-      when 0xDD, 0xDF
-        @controller ? @controller.read_port_misc : 0xFF
-      else
+      port &= 0xFF
+
+      case [port & 0x80 != 0, port & 0x40 != 0, port & 0x01 != 0]
+      when [false, false, false], [false, false, true]
         0xFF
+      when [false, true, false]
+        @vdp ? @vdp.read_v_counter : 0xFF
+      when [false, true, true]
+        @vdp ? @vdp.read_h_counter : 0xFF
+      when [true, false, false]
+        @vdp ? @vdp.read_data : 0xFF
+      when [true, false, true]
+        @vdp ? @vdp.read_status : 0xFF
+      when [true, true, false]
+        @controller ? @controller.read_port_a : 0xFF
+      when [true, true, true]
+        @controller ? @controller.read_port_misc : 0xFF
       end
     end
 
     def write_io(port, value)
+      port &= 0xFF
       value &= 0xFF
 
-      case port & 0xFF
-      when 0x7E, 0x7F
-        @psg&.write(value)
-      when 0x3F, 0xDE, 0xDF
+      case [port & 0x80 != 0, port & 0x40 != 0, port & 0x01 != 0]
+      when [false, false, true]
         @controller&.write_control(value)
-      when 0xBE
+      when [false, true, false], [false, true, true]
+        @psg&.write(value, port: port, cycle: @io_cycle)
+      when [true, false, false]
         @vdp&.write_data(value)
-      when 0xBF
+      when [true, false, true]
         @vdp&.write_control(value)
       end
     end
@@ -140,6 +144,13 @@ module SmsEmulator
       when 0xFFFD then @mapper[1] = value
       when 0xFFFE then @mapper[2] = value
       when 0xFFFF then @mapper[3] = value
+      end
+      @ram[addr - 0xE000] = value
+    end
+
+    def sync_mapper_ram
+      @mapper.each_with_index do |value, index|
+        @ram[0x1FFC + index] = value
       end
     end
   end

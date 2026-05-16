@@ -30,6 +30,16 @@ RSpec.describe SmsEmulator::PSG do
     expect(psg).to be_white_noise
   end
 
+  it 'treats tone period zero as one like SN76489 hardware' do
+    psg = described_class.new
+
+    psg.write(0x80)
+    psg.write(0x00)
+
+    expect(psg.tone_periods[0]).to eq(0)
+    expect(psg.tone_frequency(0)).to be_within(0.001).of(described_class::CLOCK / 32.0)
+  end
+
   it 'renders bounded mixed samples' do
     psg = described_class.new
     psg.write(0x80 | 0x01)

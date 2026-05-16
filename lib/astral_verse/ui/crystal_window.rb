@@ -12,10 +12,12 @@ module AstralVerse
     HEIGHT = DRAW_HEIGHT + TOOLBAR_HEIGHT + STATUS_BAR
 
     TOOLBAR_BUTTONS = [
-      { label: "📂 Open",  x: 10,  w: 100, action: :open_relic },
-      { label: "▶ Start",  x: 120, w: 100, action: :start },
-      { label: "⏹ Stop",   x: 230, w: 100, action: :stop },
-      { label: "⛶ Full",   x: 340, w: 100, action: :fullscreen },
+      { label: "Open",  x: 8,   w: 86, action: :open_relic },
+      { label: "Start", x: 102, w: 86, action: :start },
+      { label: "Stop",  x: 196, w: 86, action: :stop },
+      { label: "Save",  x: 290, w: 86, action: :save_state },
+      { label: "Load",  x: 384, w: 86, action: :load_state },
+      { label: "Full",  x: 478, w: 86, action: :fullscreen },
     ].freeze
 
     def initialize(stone)
@@ -36,6 +38,8 @@ module AstralVerse
       @fullscreen_shortcut_down = false
       @frame_image = nil
       @audio_player = PsgPlayer.new(@stone.emulator.psg)
+      @status_flash = nil
+      @status_flash_until = 0
       @framebuffer_object_id = nil
       @framebuffer_signature = nil
       @sms_palette_rgba = Array.new(64) do |value|
@@ -153,13 +157,18 @@ module AstralVerse
       Gosu.draw_rect(0, TOOLBAR_HEIGHT - 1, width, 1, Gosu::Color.new(255, 90, 70, 140))
 
       # Armed ROM label (right side of toolbar)
-      if armed_relic_path
+      if @status_flash && Gosu.milliseconds < @status_flash_until
+        label = @status_flash
+      elsif armed_relic_path
         label = "💎 Armed: #{armed_relic_name(21)}"
       else
         label = "💎 Armed: None"
       end
-      label_x = width - @font_tool.text_width(label) - 12
-      @font_tool.draw_text(label, label_x, 9, 10, 1, 1, Gosu::Color.new(255, 180, 150, 100))
+      label_width = @font_tool.text_width(label)
+      if width - 576 > label_width + 16
+        label_x = width - label_width - 12
+        @font_tool.draw_text(label, label_x, 9, 10, 1, 1, Gosu::Color.new(255, 180, 150, 100))
+      end
 
       # Buttons
       TOOLBAR_BUTTONS.each do |btn|
@@ -220,6 +229,12 @@ module AstralVerse
                 @audio_player&.stop
                 @frame_count = 0
                 return
+              when :save_state
+                save_state
+                return
+              when :load_state
+                load_state
+                return
               when :fullscreen
                 toggle_fullscreen
                 return
@@ -233,6 +248,10 @@ module AstralVerse
         return
       when Gosu::KB_SPACE
         toggle_start
+      when Gosu::KB_F5
+        save_state
+      when Gosu::KB_F9
+        load_state
       when Gosu::KB_R
         @stone.attune
         @audio_player&.stop
@@ -323,6 +342,37 @@ module AstralVerse
         @running = !@running
         @audio_player&.stop unless @running
       end
+    end
+
+    def save_state
+      path = @stone.save_snapshot
+      flash_status("Saved #{File.basename(path)}")
+    rescue => e
+      flash_status("Save failed: #{e.message}")
+    end
+
+    def load_state
+      was_running = @running
+      @running = false
+      @audio_player&.stop
+      path = @stone.load_snapshot
+      @audio_player = PsgPlayer.new(@stone.emulator.psg)
+      @frame_count = @stone.emulator.frame_count
+      @frame_image = nil
+      @framebuffer_signature = nil
+      refresh_frame_image
+      @last_vision = Gosu.milliseconds
+      @running = was_running
+      flash_status("Loaded #{File.basename(path)}")
+    rescue => e
+      @running = false
+      flash_status("Load failed: #{e.message}")
+    end
+
+    def flash_status(message)
+      @status_flash = message
+      @status_flash_until = Gosu.milliseconds + 2500
+      puts message
     end
 
     def needs_pick?

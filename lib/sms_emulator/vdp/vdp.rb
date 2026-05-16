@@ -15,9 +15,13 @@ module SmsEmulator
       @vram = Array.new(0x4000, 0)    # 16KB VRAM
       @cram = Array.new(32, 0)        # 32 bytes Color RAM
       @framebuffer = Array.new(SMS_WIDTH * SMS_HEIGHT, 0)
+      @bg_priority = Array.new(SMS_WIDTH * SMS_HEIGHT, false)
+      @bg_color_id = Array.new(SMS_WIDTH * SMS_HEIGHT, 0)
       @irq_line = false
       @status = 0x00
       @addr_latch = nil
+      @latched_control_byte = 0
+      @read_buffer = 0
       @code_register = 0
       @v_counter = 0
       @h_counter = 0
@@ -32,9 +36,13 @@ module SmsEmulator
       @vram.fill(0)
       @cram.fill(0)
       @framebuffer.fill(0)
+      @bg_priority.fill(false)
+      @bg_color_id.fill(0)
       @irq_line = false
       @status = 0x00
       @addr_latch = nil
+      @latched_control_byte = 0
+      @read_buffer = 0
       @code_register = 0
       @v_counter = 0
       @h_counter = 0
@@ -47,7 +55,8 @@ module SmsEmulator
     # CPU I/O port $BE - VDP data port (read/write)
     def read_data
       @write_pending = false
-      value = @vram[@addr_latch || 0]
+      value = @read_buffer
+      @read_buffer = @vram[@addr_latch || 0] || 0
       increment_address
       value
     end
@@ -66,6 +75,7 @@ module SmsEmulator
         @video_dirty = true if @vram[vram_addr] != value
         @vram[vram_addr] = value
       end
+      @read_buffer = value
 
       increment_address
     end
@@ -76,22 +86,27 @@ module SmsEmulator
       if @write_pending
         # Second write: upper byte with command/register selector.
         @code_register = (value >> 6) & 0x03
-        latched = @addr_latch || 0
+        latched = @latched_control_byte
 
         if @code_register == 2
           reg_num = value & 0x0F
           if reg_num < NUM_REGISTERS
-            @video_dirty = true if @registers[reg_num] != (latched & 0xFF)
-            @registers[reg_num] = latched & 0xFF
+            @video_dirty = true if @registers[reg_num] != @latched_control_byte
+            @registers[reg_num] = @latched_control_byte
           end
-          @addr_latch = 0
+          @addr_latch = (latched | ((value & 0x3F) << 8)) & 0x3FFF
         else
           @addr_latch = (latched | ((value & 0x3F) << 8)) & 0x3FFF
+          if @code_register == 0
+            @read_buffer = @vram[@addr_latch] || 0
+            increment_address
+          end
         end
         @write_pending = false
       else
         # First write: lower address byte
-        @addr_latch = value & 0xFF
+        @latched_control_byte = value & 0xFF
+        @addr_latch = ((@addr_latch || 0) & 0x3F00) | @latched_control_byte
         @write_pending = true
       end
     end
@@ -126,7 +141,12 @@ module SmsEmulator
       @v_counter = scanline
       unless display_enabled?
         backdrop = @cram[(@registers[7] & 0x0F) | 0x10] || 0
-        SMS_WIDTH.times { |x| @framebuffer[scanline * SMS_WIDTH + x] = backdrop }
+        row_offset = scanline * SMS_WIDTH
+        SMS_WIDTH.times do |x|
+          @framebuffer[row_offset + x] = backdrop
+          @bg_priority[row_offset + x] = false
+          @bg_color_id[row_offset + x] = 0
+        end
         return
       end
 
@@ -136,23 +156,34 @@ module SmsEmulator
     end
 
     def render_background_scanline(scanline)
-      name_base = (@registers[2] & 0x0E) << 10
+      name_base = ((@registers[2] & 0x0F) << 10) & 0xF800
+      name_mask = 0xFBFF | ((@registers[2] & 0x01) << 10)
+      x_scroll = horizontal_scroll_locked?(scanline) ? 0 : ((@registers[8] || 0) & 0xFF)
+      coarse_x = x_scroll >> 3
+      fine_x = x_scroll & 7
       y_scroll = (@registers[9] || 0) & 0xFF
-      x_scroll = (@registers[8] || 0) & 0xFF
-      source_y = (scanline + y_scroll) & 0xFF
-      tile_row = (source_y / 8) & 0x1F
-      row_in_tile = source_y & 7
+      coarse_y = y_scroll >> 3
+      fine_y = y_scroll & 7
       row_offset = scanline * SMS_WIDTH
+      backdrop = @cram[(@registers[7] & 0x0F) | 0x10] || 0
 
-      33.times do |screen_tile|
-        screen_x = screen_tile * 8
-        source_x = (screen_x - x_scroll) & 0xFF
-        tile_col = (source_x / 8) & 0x1F
-        first_col = source_x & 7
-        entry_addr = (name_base + ((tile_row * 32 + tile_col) * 2)) & 0x3FFF
+      SMS_WIDTH.times do |x|
+        @framebuffer[row_offset + x] = backdrop
+        @bg_priority[row_offset + x] = false
+        @bg_color_id[row_offset + x] = 0
+      end
+
+      32.times do |screen_tile|
+        tile_col = (screen_tile + 32 - coarse_x) & 0x1F
+        column_y_scroll = vertical_scroll_locked?(screen_tile) ? 0 : y_scroll
+        tile_row = ((scanline + (column_y_scroll & 7)) / 8 + (column_y_scroll >> 3)) % 28
+        row_in_tile = (scanline + fine_y) & 7
+        row_in_tile = scanline & 7 if vertical_scroll_locked?(screen_tile)
+        entry_addr = (name_base + ((tile_row * 32 + tile_col) * 2)) & name_mask
         entry = @vram[entry_addr] | ((@vram[(entry_addr + 1) & 0x3FFF] || 0) << 8)
         tile_index = entry & 0x01FF
         palette = (entry & 0x0800) != 0 ? 16 : 0
+        priority = (entry & 0x1000) != 0
         h_flip = (entry & 0x0200) != 0
         v_flip = (entry & 0x0400) != 0
         py = v_flip ? 7 - row_in_tile : row_in_tile
@@ -163,17 +194,19 @@ module SmsEmulator
         b3 = @vram[(pattern_base + 3) & 0x3FFF]
 
         8.times do |pixel_in_tile|
-          x = screen_x + pixel_in_tile
+          x = screen_tile * 8 + fine_x + pixel_in_tile
           next if x >= SMS_WIDTH
 
-          col = (first_col + pixel_in_tile) & 7
-          px = h_flip ? 7 - col : col
+          px = h_flip ? 7 - pixel_in_tile : pixel_in_tile
           bit = 7 - px
           color_index = ((b0 >> bit) & 1) |
             (((b1 >> bit) & 1) << 1) |
             (((b2 >> bit) & 1) << 2) |
             (((b3 >> bit) & 1) << 3)
-          @framebuffer[row_offset + x] = @cram[(palette + color_index) & 0x1F] || 0
+          pixel_offset = row_offset + x
+          @framebuffer[pixel_offset] = @cram[(palette + color_index) & 0x1F] || 0
+          @bg_priority[pixel_offset] = priority
+          @bg_color_id[pixel_offset] = color_index
         end
       end
     end
@@ -185,30 +218,33 @@ module SmsEmulator
       occupied = Array.new(SMS_WIDTH, false)
 
       64.times do |sprite_index|
-        attr_addr = (sprite_attribute_base + sprite_index) & 0x3FFF
+        attr_addr = (sprite_attribute_y_base + sprite_index) & 0x3FFF
         y = @vram[attr_addr] || 0
         break if y == 0xD0
 
-        y = (y + 1) & 0xFF
-        y -= 256 if y > 240
-        next unless scanline >= y && scanline < y + sprite_height * zoom
+        sprite_bottom = (y + sprite_height * zoom) & 0xFF
+        overlaps = if y < sprite_bottom
+                     scanline >= y && scanline < sprite_bottom
+                   else
+                     scanline >= y || scanline < sprite_bottom
+                   end
+        next unless overlaps
 
         drawn_on_line += 1
         @status |= 0x40 if drawn_on_line > 8
         next if drawn_on_line > 8
 
-        entry_addr = (sprite_attribute_base + 0x80 + sprite_index * 2) & 0x3FFF
+        entry_addr = (sprite_attribute_x_base + sprite_index * 2) & 0x3FFF
         x = @vram[entry_addr] || 0
         tile = @vram[(entry_addr + 1) & 0x3FFF] || 0
         x -= 8 if (@registers[0] & 0x08) != 0
-        row = (scanline - y) / zoom
+        row = ((scanline - y) & 0xFF) / zoom
         tile &= 0xFE if sprite_16px?
         tile += 1 if row >= 8
         row &= 7
-        tile = (tile + sprite_pattern_offset) & 0x1FF
 
         8.times do |col|
-          color_index = pattern_pixel(tile, col, row)
+          color_index = sprite_pattern_pixel(tile, col, row)
           next if color_index == 0
 
           zoom.times do |zx|
@@ -216,8 +252,13 @@ module SmsEmulator
             next if px.negative? || px >= SMS_WIDTH
 
             @status |= 0x20 if occupied[px]
+            next if occupied[px]
+
             occupied[px] = true
-            @framebuffer[scanline * SMS_WIDTH + px] = @cram[(16 + color_index) & 0x1F] || 0
+            pixel_offset = scanline * SMS_WIDTH + px
+            next if @bg_priority[pixel_offset] && @bg_color_id[pixel_offset] != 0
+
+            @framebuffer[pixel_offset] = @cram[(16 + color_index) & 0x1F] || 0
           end
         end
       end
@@ -254,6 +295,11 @@ module SmsEmulator
       @render_version += 1
     end
 
+    def finish_frame_render
+      @video_dirty = false
+      @render_version += 1
+    end
+
     def clock_line_interrupt
       if @line_counter.zero?
         @line_counter = @registers[10] & 0xFF
@@ -272,12 +318,29 @@ module SmsEmulator
         (((@vram[(base + 3) & 0x3FFF] >> bit) & 1) << 3)
     end
 
+    def sprite_pattern_pixel(tile_index, x, y)
+      base = (sprite_pattern_offset | (tile_index * 32) | (y * 4)) & 0x3FFF
+      bit = 7 - x
+      ((@vram[base] >> bit) & 1) |
+        (((@vram[(base + 1) & 0x3FFF] >> bit) & 1) << 1) |
+        (((@vram[(base + 2) & 0x3FFF] >> bit) & 1) << 2) |
+        (((@vram[(base + 3) & 0x3FFF] >> bit) & 1) << 3)
+    end
+
     def sprite_attribute_base
-      (@registers[5] & 0x7E) << 7
+      (@registers[5] & 0x7F) << 7
+    end
+
+    def sprite_attribute_y_base
+      sprite_attribute_base & 0x3F00
+    end
+
+    def sprite_attribute_x_base
+      sprite_attribute_y_base | 0x80
     end
 
     def sprite_pattern_offset
-      (@registers[6] & 0x04) != 0 ? 0x100 : 0
+      ((@registers[6] & 0x07) << 11) & 0x2000
     end
 
     def sprite_16px?
@@ -294,6 +357,14 @@ module SmsEmulator
 
     def left_column_blank?
       (@registers[0] & 0x20) != 0
+    end
+
+    def horizontal_scroll_locked?(scanline)
+      scanline < 16 && (@registers[0] & 0x40) != 0
+    end
+
+    def vertical_scroll_locked?(screen_tile)
+      screen_tile >= 24 && (@registers[0] & 0x80) != 0
     end
 
     def frame_irq_enabled?

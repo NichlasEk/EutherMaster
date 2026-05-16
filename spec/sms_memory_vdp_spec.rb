@@ -14,6 +14,20 @@ RSpec.describe SmsEmulator::Memory do
     expect(memory.read_byte(0x0400)).to eq(0x20)
   end
 
+  it 'mirrors mapper registers into RAM so games can save and restore banks' do
+    memory = described_class.new
+    memory.load_rom(Array.new(0xC000, 0))
+
+    expect(memory.read_byte(0xFFFC)).to eq(0)
+    expect(memory.read_byte(0xFFFD)).to eq(0)
+    expect(memory.read_byte(0xFFFE)).to eq(1)
+    expect(memory.read_byte(0xFFFF)).to eq(2)
+
+    memory.write_byte(0xFFFF, 0x82)
+
+    expect(memory.read_byte(0xFFFF)).to eq(0x82)
+  end
+
   it 'routes VDP ports through the memory bus' do
     vdp = SmsEmulator::VDP.new
     memory = described_class.new(vdp)
@@ -22,6 +36,19 @@ RSpec.describe SmsEmulator::Memory do
     memory.write_io(0xBF, 0x81)
 
     expect(vdp.registers[1]).to eq(0xE0)
+  end
+
+  it 'routes mirrored SMS VDP ports by bit pattern' do
+    vdp = SmsEmulator::VDP.new
+    memory = described_class.new(vdp)
+
+    memory.write_io(0x81, 0x00)
+    memory.write_io(0x81, 0x40)
+    memory.write_io(0x80, 0x7B)
+    memory.write_io(0x81, 0x00)
+    memory.write_io(0x81, 0x00)
+
+    expect(memory.read_io(0x80)).to eq(0x7B)
   end
 
   it 'mirrors controller reads on the alternate SMS input ports' do
@@ -60,7 +87,7 @@ RSpec.describe SmsEmulator::VDP do
     vdp.cram[17] = 0x15
     sprite_base = 0x3F00
 
-    vdp.vram[sprite_base] = 9
+    vdp.vram[sprite_base] = 10
     vdp.vram[sprite_base + 0x80] = 20
     vdp.vram[sprite_base + 0x81] = 1
     vdp.vram[32] = 0x80
@@ -87,6 +114,24 @@ RSpec.describe SmsEmulator::VDP do
     vdp.render_frame
 
     expect(vdp.read_status & 0x60).to eq(0x60)
+  end
+
+  it 'only terminates mode 4 sprite scanning on the D0 marker' do
+    vdp = described_class.new
+    vdp.registers[1] = 0x40
+    vdp.registers[5] = 0x7E
+    vdp.cram[17] = 0x15
+    sprite_base = 0x3F00
+
+    vdp.vram[sprite_base] = 0xD5
+    vdp.vram[sprite_base + 1] = 10
+    vdp.vram[sprite_base + 0x82] = 20
+    vdp.vram[sprite_base + 0x83] = 1
+    vdp.vram[32] = 0x80
+
+    vdp.render_scanline(10)
+
+    expect(vdp.framebuffer[10 * described_class::SMS_WIDTH + 20]).to eq(0x15)
   end
 
   it 'uses backdrop color when display is disabled' do
@@ -116,6 +161,55 @@ RSpec.describe SmsEmulator::VDP do
     expect(vdp.framebuffer[0]).to eq(0x22)
     expect(vdp.framebuffer[8]).to eq(0x11)
   end
+
+  it 'uses the VDP read buffer and prefetches on VRAM read commands' do
+    vdp = described_class.new
+    vdp.vram[0x1234] = 0xAB
+    vdp.vram[0x1235] = 0xCD
+
+    vdp.write_control(0x34)
+    vdp.write_control(0x12)
+
+    expect(vdp.read_data).to eq(0xAB)
+    expect(vdp.read_data).to eq(0xCD)
+  end
+
+  it 'keeps the composed VDP address after register writes' do
+    vdp = described_class.new
+
+    vdp.write_control(0xE0)
+    vdp.write_control(0x81)
+    vdp.write_data(0x44)
+
+    expect(vdp.registers[1]).to eq(0xE0)
+    expect(vdp.vram[0x01E0]).to eq(0x44)
+  end
+
+  it 'keeps address high bits when a new control sequence writes only the low byte first' do
+    vdp = described_class.new
+
+    vdp.write_control(0x34)
+    vdp.write_control(0x12)
+    vdp.read_data
+    vdp.write_control(0x56)
+    vdp.write_data(0x99)
+
+    expect(vdp.vram[0x1256]).to eq(0x99)
+  end
+
+  it 'replaces address high bits on the second control byte' do
+    vdp = described_class.new
+
+    vdp.write_control(0x34)
+    vdp.write_control(0x3F)
+    vdp.write_control(0x56)
+    vdp.write_control(0x40)
+    vdp.write_data(0x99)
+
+    expect(vdp.vram[0x0056]).to eq(0x99)
+    expect(vdp.vram[0x3F56]).to eq(0)
+  end
+
 end
 
 RSpec.describe AstralVerse::ScryingStone do
@@ -125,5 +219,25 @@ RSpec.describe AstralVerse::ScryingStone do
 
     expect { stone.gaze_frame }.not_to raise_error
     expect(stone.emulator.cpu.halted).to be true
+  end
+
+  it 'saves and loads emulator snapshots' do
+    Dir.mktmpdir do |dir|
+      path = File.join(dir, 'state.bin')
+      stone = described_class.new
+      stone.absorb_codex_essence([0x00, 0x76])
+      stone.gaze_frame
+      saved_pc = stone.emulator.cpu.pc
+
+      stone.save_snapshot(path)
+      stone.emulator.cpu.pc = 0x1234
+      stone.emulator.cpu.instance_variable_set(:@memory, nil)
+      stone.load_snapshot(path)
+
+      expect(stone.emulator.cpu.pc).to eq(saved_pc)
+      expect(stone.emulator.cpu.memory).to equal(stone.emulator.memory)
+      expect(stone.emulator.memory.vdp).to equal(stone.emulator.vdp)
+      expect(stone.vision_sprite.scrying_pool).to eq(stone.emulator.vdp.framebuffer)
+    end
   end
 end

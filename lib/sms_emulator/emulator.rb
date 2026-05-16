@@ -113,6 +113,14 @@ module SmsEmulator
       reset
     end
 
+    def rewire_after_snapshot_load
+      @memory.vdp = @vdp
+      @memory.controller = @controller
+      @memory.psg = @psg
+      @cpu.instance_variable_set(:@memory, @memory)
+      self
+    end
+
     def reset
       @cpu.reset
       @vdp.reset
@@ -135,6 +143,7 @@ module SmsEmulator
         target_cycles = (scanline + 1) * CYCLES_PER_SCANLINE
 
         while cycles_this_frame < target_cycles
+          @memory.io_cycle = cycles_this_frame
           cycles = @cpu.step
           cycles = 4 if cycles <= 0
           cycles_this_frame += cycles
@@ -145,11 +154,11 @@ module SmsEmulator
           end
         end
 
-        @vdp.step_scanline(scanline, render: false)
+        @vdp.step_scanline(scanline, render: true)
       end
 
       cpu_finished = monotonic_time
-      @vdp.render_visible_frame
+      @vdp.finish_frame_render
       vdp_finished = monotonic_time
       @frame_count += 1
       record_perf(cpu_finished - cpu_started, vdp_finished - cpu_finished, vdp_finished - frame_started, steps_this_frame)
