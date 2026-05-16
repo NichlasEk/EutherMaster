@@ -87,6 +87,24 @@ module SmsEmulator
       @cycles
     end
 
+    def fast_forward_idle_loop(max_cycles)
+      return 0 if max_cycles < 29
+      return 0 unless read_byte(@pc) == 0x3A && read_byte(@pc + 3) == 0xB7 &&
+        read_byte(@pc + 4) == 0x20 && read_byte(@pc + 5) == 0xFA
+
+      addr = read_byte(@pc + 1) | (read_byte(@pc + 2) << 8)
+      return 0 if read_byte(addr) == 0
+
+      iterations = max_cycles / 29
+      skipped = iterations * 29
+      @a = read_byte(addr)
+      @f = sz_flags(@a) | (@a & FLAG_YX)
+      @r = (@r + (iterations * 2)) & 0x7F
+      @cycles = skipped
+      @total_cycles += skipped
+      skipped
+    end
+
     def execute_opcode(opcode)
       case opcode
       when 0xCB then execute_cb(fetch_opcode, nil, nil)

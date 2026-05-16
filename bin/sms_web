@@ -1,0 +1,94 @@
+#!/usr/bin/env ruby
+
+require 'socket'
+require 'uri'
+
+PROJECT_ROOT = File.expand_path('..', __dir__)
+DEFAULT_WEB_ROOT = '/home/nichlas/SMSWEB'
+ROOT = File.expand_path(ENV.fetch('SMS_WEB_ROOT', Dir.exist?(DEFAULT_WEB_ROOT) ? DEFAULT_WEB_ROOT : PROJECT_ROOT))
+HOST = ENV.fetch('SMS_WEB_HOST', '0.0.0.0')
+PORT = Integer(ENV.fetch('SMS_WEB_PORT', '4567'))
+
+MIME_TYPES = {
+  '.html' => 'text/html; charset=utf-8',
+  '.css' => 'text/css; charset=utf-8',
+  '.js' => 'text/javascript; charset=utf-8',
+  '.json' => 'application/json; charset=utf-8',
+  '.rb' => 'text/plain; charset=utf-8',
+  '.wasm' => 'application/wasm',
+  '.sms' => 'application/octet-stream',
+  '.bin' => 'application/octet-stream'
+}.freeze
+
+def local_addresses
+  Socket.ip_address_list
+    .select { |addr| addr.ipv4? && !addr.ipv4_loopback? }
+    .map(&:ip_address)
+    .uniq
+end
+
+def safe_path(request_path)
+  path = URI.decode_www_form_component(request_path.split('?', 2).first)
+  path = '/web/index.html' if path == '/'
+  full = File.expand_path(path.delete_prefix('/'), ROOT)
+  return nil unless full.start_with?(ROOT + File::SEPARATOR)
+  return nil unless File.file?(full)
+
+  full
+end
+
+def write_response(socket, status, body, content_type = 'text/plain; charset=utf-8', head: false)
+  socket.write "HTTP/1.1 #{status}\r\n"
+  socket.write "Content-Type: #{content_type}\r\n"
+  socket.write "Content-Length: #{body.bytesize}\r\n"
+  socket.write "Cache-Control: no-store\r\n"
+  socket.write "Connection: close\r\n"
+  socket.write "\r\n"
+  socket.write body unless head
+end
+
+server = TCPServer.new(HOST, PORT)
+
+puts "SMS web emulator server"
+puts "  Local:   http://localhost:#{PORT}/"
+local_addresses.each { |ip| puts "  Phone:   http://#{ip}:#{PORT}/" }
+puts "  Ctrl-C to stop"
+
+loop do
+  client = server.accept
+  request = client.gets
+  unless request
+    client.close
+    next
+  end
+
+  method, path, = request.split
+  loop do
+    line = client.gets
+    break if line.nil? || line == "\r\n"
+  end
+
+  unless ['GET', 'HEAD'].include?(method)
+    write_response(client, '405 Method Not Allowed', "Method not allowed\n")
+    client.close
+    next
+  end
+
+  full = safe_path(path)
+  unless full
+    write_response(client, '404 Not Found', "Not found\n")
+    client.close
+    next
+  end
+
+  ext = File.extname(full)
+  body = File.binread(full)
+  write_response(client, '200 OK', body, MIME_TYPES.fetch(ext, 'application/octet-stream'), head: method == 'HEAD')
+  client.close
+rescue Interrupt
+  puts
+  break
+rescue => e
+  warn "#{e.class}: #{e.message}"
+  client&.close
+end

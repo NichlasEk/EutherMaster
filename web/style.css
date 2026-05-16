@@ -1,0 +1,237 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: #090715;
+  color: #f1eaff;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overscroll-behavior: none;
+  touch-action: none;
+}
+
+button,
+.file-button {
+  border: 1px solid #6c568f;
+  background: #241a3d;
+  color: #f5edff;
+  font: inherit;
+  min-height: 44px;
+}
+
+button:disabled {
+  opacity: 0.45;
+}
+
+.shell {
+  min-height: 100dvh;
+  display: grid;
+  grid-template-rows: 1fr auto auto auto;
+  gap: 10px;
+  padding: max(10px, env(safe-area-inset-top)) max(10px, env(safe-area-inset-right))
+    max(10px, env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left));
+}
+
+.stage {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  min-height: 0;
+  position: relative;
+}
+
+#screen {
+  width: min(100%, calc((100dvh - 190px) * 1.3333));
+  max-height: calc(100dvh - 190px);
+  aspect-ratio: 4 / 3;
+  image-rendering: pixelated;
+  background: #000;
+  border: 1px solid #46366d;
+}
+
+.status {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 5;
+  max-width: min(820px, calc(100vw - 24px));
+  padding: 6px 8px;
+  border: 1px solid #6c568f;
+  background: rgba(5, 4, 12, 0.82);
+  color: #f1eaff;
+  font-family: ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.25;
+  text-align: left;
+  pointer-events: none;
+}
+
+.toolbar {
+  display: grid;
+  grid-template-columns: 1fr 92px 92px 92px;
+  gap: 8px;
+}
+
+.rom-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  min-height: 44px;
+  color: #bfb2d9;
+  font-size: 13px;
+}
+
+.rom-list button {
+  overflow: hidden;
+  padding: 0 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-button {
+  display: grid;
+  place-items: center;
+  padding: 0 14px;
+}
+
+.file-button input {
+  display: none;
+}
+
+.touch-controls {
+  display: grid;
+  grid-template-columns: minmax(132px, 180px) minmax(132px, 180px);
+  justify-content: space-between;
+  align-items: end;
+  gap: 16px;
+  user-select: none;
+}
+
+.dpad {
+  display: grid;
+  grid-template-areas:
+    ". up ."
+    "left . right"
+    ". down .";
+  grid-template-columns: repeat(3, 52px);
+  grid-template-rows: repeat(3, 52px);
+  gap: 4px;
+}
+
+.dpad button,
+.actions button {
+  border-radius: 50%;
+  background: #201833;
+}
+
+.dpad .up {
+  grid-area: up;
+}
+
+.dpad .left {
+  grid-area: left;
+}
+
+.dpad .right {
+  grid-area: right;
+}
+
+.dpad .down {
+  grid-area: down;
+}
+
+.dpad .up::before,
+.dpad .down::before,
+.dpad .left::before,
+.dpad .right::before {
+  content: "";
+  display: block;
+  width: 0;
+  height: 0;
+  margin: auto;
+  border-style: solid;
+}
+
+.dpad .up::before {
+  border-width: 0 10px 16px;
+  border-color: transparent transparent #f5edff;
+}
+
+.dpad .down::before {
+  border-width: 16px 10px 0;
+  border-color: #f5edff transparent transparent;
+}
+
+.dpad .left::before {
+  border-width: 10px 16px 10px 0;
+  border-color: transparent #f5edff transparent transparent;
+}
+
+.dpad .right::before {
+  border-width: 10px 0 10px 16px;
+  border-color: transparent transparent transparent #f5edff;
+}
+
+.actions {
+  display: flex;
+  justify-content: end;
+  align-items: center;
+  gap: 18px;
+}
+
+.actions button {
+  width: 70px;
+  height: 70px;
+  font-size: 24px;
+}
+
+button:active,
+.file-button:active {
+  background: #4b3575;
+}
+
+@media (orientation: landscape) {
+  .shell {
+    grid-template-columns: 190px 1fr 190px;
+    grid-template-rows: 1fr auto;
+    align-items: center;
+  }
+
+  .stage {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .toolbar {
+    grid-column: 1 / 4;
+    grid-row: 2;
+  }
+
+  .rom-list {
+    grid-column: 1 / 4;
+    grid-row: 3;
+  }
+
+  .touch-controls {
+    display: contents;
+  }
+
+  .dpad {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .actions {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  #screen {
+    width: min(100%, calc(100dvh * 1.25));
+    max-height: calc(100dvh - 72px);
+  }
+}

@@ -1,7 +1,12 @@
-require 'gosu'
+begin
+  require 'gosu'
+rescue LoadError
+  # Gosu is intentionally absent in ruby.wasm/browser builds.
+end
 
 module SmsEmulator
-  class EmulatorWindow < Gosu::Window
+  if defined?(Gosu)
+    class EmulatorWindow < Gosu::Window
     SCALE = 2
     WIDTH = VDP::SMS_WIDTH * SCALE
     HEIGHT = VDP::SMS_HEIGHT * SCALE
@@ -80,10 +85,12 @@ module SmsEmulator
       when Gosu::KB_X     then ctrl.release(Controller::BUTTON_B)
       end
     end
+    end
   end
 
   class Emulator
     attr_reader :cpu, :vdp, :memory, :controller, :psg, :frame_count, :perf
+    attr_accessor :fast_idle_enabled
 
     # Master System runs Z80 at ~3.58 MHz, VDP at ~10.7 MHz
     # Frame: 262 scanlines (NTSC), 313 scanlines (PAL)
@@ -98,6 +105,7 @@ module SmsEmulator
       @cpu = Z80.new(@memory)
       @frame_count = 0
       @rom_loaded = false
+      @fast_idle_enabled = false
       reset_perf
     end
 
@@ -143,15 +151,30 @@ module SmsEmulator
       262.times do |scanline|
         target_cycles = (scanline + 1) * CYCLES_PER_SCANLINE
 
-        while cycles_this_frame < target_cycles
-          @memory.io_cycle = cycles_this_frame
-          cycles = @cpu.step
-          cycles = 4 if cycles <= 0
-          cycles_this_frame += cycles
-          steps_this_frame += 1
+        if @fast_idle_enabled
+          while cycles_this_frame < target_cycles
+            @memory.io_cycle = cycles_this_frame
+            cycles = @cpu.fast_forward_idle_loop(target_cycles - cycles_this_frame)
+            cycles = @cpu.step if cycles <= 0
+            cycles = 4 if cycles <= 0
+            cycles_this_frame += cycles
+            steps_this_frame += 1
 
-          if @vdp.irq_line && @cpu.iff1
-            cycles_this_frame += @cpu.interrupt
+            if @vdp.irq_line && @cpu.iff1
+              cycles_this_frame += @cpu.interrupt
+            end
+          end
+        else
+          while cycles_this_frame < target_cycles
+            @memory.io_cycle = cycles_this_frame
+            cycles = @cpu.step
+            cycles = 4 if cycles <= 0
+            cycles_this_frame += cycles
+            steps_this_frame += 1
+
+            if @vdp.irq_line && @cpu.iff1
+              cycles_this_frame += @cpu.interrupt
+            end
           end
         end
 
@@ -198,7 +221,13 @@ module SmsEmulator
     private
 
     def monotonic_time
-      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      if defined?(Process::CLOCK_MONOTONIC)
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      elsif defined?(JS)
+        JS.global[:performance].call(:now).to_f / 1000.0
+      else
+        Time.now.to_f
+      end
     end
 
     def record_perf(cpu_seconds, vdp_seconds, frame_seconds, cpu_steps)
@@ -214,6 +243,7 @@ module SmsEmulator
     end
 
     def run
+      require 'gosu' unless defined?(Gosu)
       window = EmulatorWindow.new(self)
       window.show
     end

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Astral SMS Web</title>
+    <link rel="stylesheet" href="/web/style.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/@ruby/3.4-wasm-wasi@2.7.2/dist/browser.script.iife.js"></script>
+    <script defer src="/web/app.js"></script>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="stage">
+        <canvas id="screen" width="256" height="192"></canvas>
+        <div class="status" id="status">Loading Ruby VM...</div>
+      </section>
+
+      <section class="toolbar">
+        <label class="file-button">
+          <input id="rom-file" type="file" accept=".sms,.bin,application/octet-stream">
+          Open ROM
+        </label>
+        <button id="run-button" type="button" disabled>Run</button>
+        <button id="pause-button" type="button" disabled>Pause</button>
+        <button id="skip-button" type="button">Skip 1</button>
+      </section>
+
+      <section class="rom-list" id="rom-list" aria-label="Cached ROM choices"></section>
+
+      <section class="touch-controls" aria-label="Master System controls">
+        <div class="dpad">
+          <button data-button="up" class="up" aria-label="Up"></button>
+          <button data-button="left" class="left" aria-label="Left"></button>
+          <button data-button="right" class="right" aria-label="Right"></button>
+          <button data-button="down" class="down" aria-label="Down"></button>
+        </div>
+        <div class="actions">
+          <button data-button="a" aria-label="Button 1">1</button>
+          <button data-button="b" aria-label="Button 2">2</button>
+        </div>
+      </section>
+    </main>
+
+    <script type="text/ruby" src="/lib/sms_emulator/memory.rb"></script>
+    <script type="text/ruby" src="/lib/sms_emulator/cpu/z80.rb"></script>
+    <script type="text/ruby" src="/lib/sms_emulator/vdp/vdp.rb"></script>
+    <script type="text/ruby" src="/lib/sms_emulator/io/controller.rb"></script>
+    <script type="text/ruby" src="/lib/sms_emulator/audio/psg.rb"></script>
+    <script type="text/ruby" src="/lib/sms_emulator/emulator.rb"></script>
+    <script type="text/ruby" src="/web/sms_web.rb"></script>
+  </body>
+</html>
