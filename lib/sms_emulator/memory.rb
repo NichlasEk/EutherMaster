@@ -5,16 +5,17 @@ module SmsEmulator
 
     attr_reader :ram, :rom, :cartridge
 
-    def initialize(vdp = nil, controller = nil)
+    def initialize(vdp = nil, controller = nil, psg = nil)
       @ram = Array.new(RAM_SIZE, 0)
       @rom = Array.new(ROM_SIZE, 0)
       @cartridge = nil
       @vdp = vdp
       @controller = controller
+      @psg = psg
       @mapper = [0, 0, 1, 2]
     end
 
-    attr_accessor :vdp, :controller
+    attr_accessor :vdp, :controller, :psg
 
     def load_rom(data)
       @cartridge = data.dup
@@ -98,6 +99,8 @@ module SmsEmulator
       value &= 0xFF
 
       case port & 0xFF
+      when 0x7E, 0x7F
+        @psg&.write(value)
       when 0x3F, 0xDE, 0xDF
         @controller&.write_control(value)
       when 0xBE

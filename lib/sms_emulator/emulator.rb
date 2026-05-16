@@ -83,7 +83,7 @@ module SmsEmulator
   end
 
   class Emulator
-    attr_reader :cpu, :vdp, :memory, :controller, :frame_count, :perf
+    attr_reader :cpu, :vdp, :memory, :controller, :psg, :frame_count, :perf
 
     # Master System runs Z80 at ~3.58 MHz, VDP at ~10.7 MHz
     # Frame: 262 scanlines (NTSC), 313 scanlines (PAL)
@@ -93,7 +93,8 @@ module SmsEmulator
     def initialize
       @vdp = VDP.new
       @controller = Controller.new
-      @memory = Memory.new(@vdp, @controller)
+      @psg = PSG.new
+      @memory = Memory.new(@vdp, @controller, @psg)
       @cpu = Z80.new(@memory)
       @frame_count = 0
       @rom_loaded = false
@@ -116,6 +117,7 @@ module SmsEmulator
       @cpu.reset
       @vdp.reset
       @controller.reset
+      @psg.reset
       @frame_count = 0
       reset_perf
     end

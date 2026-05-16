@@ -1,4 +1,5 @@
 require 'gosu'
+require_relative '../audio/psg_player'
 
 module AstralVerse
   class CrystalWindow < Gosu::Window
@@ -34,6 +35,7 @@ module AstralVerse
       @hover_button = nil
       @fullscreen_shortcut_down = false
       @frame_image = nil
+      @audio_player = PsgPlayer.new(@stone.emulator.psg)
       @framebuffer_object_id = nil
       @framebuffer_signature = nil
       @sms_palette_rgba = Array.new(64) do |value|
@@ -57,6 +59,7 @@ module AstralVerse
         if @stone.instance_variable_get(:@codex_present)
           sync_game_input_state
           @stone.gaze_frame
+          @audio_player&.update
           @frame_count += 1
           refresh_frame_image
           @last_vision = now
@@ -205,6 +208,7 @@ module AstralVerse
             if mx >= btn[:x] && mx <= btn[:x] + btn[:w]
               case btn[:action]
               when :open_relic
+                @audio_player&.stop
                 @requesting_pick = true
                 @closing = true
                 return
@@ -213,6 +217,7 @@ module AstralVerse
                 return
               when :stop
                 @running = false
+                @audio_player&.stop
                 @frame_count = 0
                 return
               when :fullscreen
@@ -223,12 +228,14 @@ module AstralVerse
           end
         end
       when Gosu::KB_ESCAPE
+        @audio_player&.stop
         @closing = true
         return
       when Gosu::KB_SPACE
         toggle_start
       when Gosu::KB_R
         @stone.attune
+        @audio_player&.stop
         @frame_count = 0
       end
 
@@ -314,6 +321,7 @@ module AstralVerse
         end
       else
         @running = !@running
+        @audio_player&.stop unless @running
       end
     end
 
