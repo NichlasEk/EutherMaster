@@ -3,13 +3,13 @@ require 'gosu'
 module AstralVerse
   module UI
     class FileBrowser < Gosu::Window
-      WIDTH = 1000
-      HEIGHT = 700
-      LINE_HEIGHT = 28
-      HEADER_HEIGHT = 90
-      FOOTER_HEIGHT = 50
-      MARGIN = 30
-      SIDEBAR_WIDTH = 220
+      WIDTH = 1400
+      HEIGHT = 900
+      LINE_HEIGHT = 36
+      HEADER_HEIGHT = 100
+      FOOTER_HEIGHT = 60
+      MARGIN = 40
+      SIDEBAR_WIDTH = 260
 
       ROM_EXTENSIONS = ['.sms', '.gg', '.bin', '.rom'].freeze
 
@@ -54,11 +54,11 @@ module AstralVerse
         @key_repeat_delay = 30   # ms before repeat starts
         @key_repeat_interval = 15 # ms between repeats when held
 
-        @font_title = Gosu::Font.new(26, name: "Courier New")
-        @font_path   = Gosu::Font.new(14, name: "Courier New")
-        @font_item   = Gosu::Font.new(16, name: "Courier New")
-        @font_small  = Gosu::Font.new(12, name: "Courier New")
-        @font_button = Gosu::Font.new(14, name: "Courier New")
+        @font_title = Gosu::Font.new(32, name: "Courier New")
+        @font_path   = Gosu::Font.new(16, name: "Courier New")
+        @font_item   = Gosu::Font.new(18, name: "Courier New")
+        @font_small  = Gosu::Font.new(13, name: "Courier New")
+        @font_button = Gosu::Font.new(16, name: "Courier New")
         @bg_anim = 0.0
 
         @bookmarks = {

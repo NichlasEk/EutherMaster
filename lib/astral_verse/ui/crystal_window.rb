@@ -2,18 +2,18 @@ require 'gosu'
 
 module AstralVerse
   class CrystalWindow < Gosu::Window
-    MAGNIFY = 2
+    MAGNIFY = 3
     DRAW_WIDTH = VisionSprite::POOL_WIDTH * MAGNIFY
     DRAW_HEIGHT = VisionSprite::POOL_HEIGHT * MAGNIFY
-    TOOLBAR_HEIGHT = 32
+    TOOLBAR_HEIGHT = 36
     STATUS_BAR = 28
     WIDTH = DRAW_WIDTH
     HEIGHT = DRAW_HEIGHT + TOOLBAR_HEIGHT + STATUS_BAR
 
     TOOLBAR_BUTTONS = [
-      { label: "📂 Open",  x: 8,   w: 80, action: :open_relic },
-      { label: "▶ Start",  x: 96,  w: 80, action: :start },
-      { label: "⏹ Stop",   x: 184, w: 80, action: :stop },
+      { label: "📂 Open",  x: 10,  w: 100, action: :open_relic },
+      { label: "▶ Start",  x: 120, w: 100, action: :start },
+      { label: "⏹ Stop",   x: 230, w: 100, action: :stop },
     ].freeze
 
     def initialize(stone)
@@ -26,9 +26,9 @@ module AstralVerse
       @closing = false
       @requesting_pick = false
       @requesting_start = false
-      @font = Gosu::Font.new(14, name: "Courier New")
-      @font_tool = Gosu::Font.new(13, name: "Courier New")
-      @font_small = Gosu::Font.new(11, name: "Courier New")
+      @font = Gosu::Font.new(16, name: "Courier New")
+      @font_tool = Gosu::Font.new(14, name: "Courier New")
+      @font_small = Gosu::Font.new(12, name: "Courier New")
       @frame_count = 0
       @hover_button = nil
     end
