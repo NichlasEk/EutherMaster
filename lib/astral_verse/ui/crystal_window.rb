@@ -24,6 +24,7 @@ module AstralVerse
       @vision_interval = 1000.0 / 60.0
       @awake = true
       @closing = false
+      @requesting_new_rom = false
       @font = Gosu::Font.new(14, name: "Courier New")
       @font_tool = Gosu::Font.new(12, name: "Courier New")
       @frame_count = 0
@@ -175,17 +176,12 @@ module AstralVerse
     end
 
     def open_relic_picker
-      require_relative 'file_browser'
-      last = AstralVerse::LastRelicCache.last_relic
-      browser = AstralVerse::UI::FileBrowser.new(last ? File.dirname(last) : Dir.home)
-      @awake = false  # Pause while picking
-      browser.show
-      if browser.selected_path
-        AstralVerse::LastRelicCache.save_relic(browser.selected_path)
-        @stone.absorb_codex(browser.selected_path)
-        @frame_count = 0
-      end
-      @awake = true
+      @requesting_new_rom = true
+      @closing = true
+    end
+
+    def needs_pick?
+      @requesting_new_rom
     end
 
     def button_up(id)

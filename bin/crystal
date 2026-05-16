@@ -2,66 +2,61 @@
 
 require_relative '../lib/astral_verse'
 
-relic_path = nil
+puts "═" * 50
+puts "   🔮 A S T R A L V E R S E"
+puts "═" * 50
+puts
 
-if ARGV.empty?
-  # Check if we have a cached relic
-  last = AstralVerse::LastRelicCache.last_relic
+loop do
+  stone = AstralVerse::ScryingStone.new
 
-  if last
-    puts "🔮 A previous relic lingers in memory..."
-    puts "   #{last}"
-    puts "   Press [Y] to reattune, [N] to browse, or [Q] to quit"
+  # If there's a cached ROM, load it directly
+  if AstralVerse::LastRelicCache.last_relic
+    begin
+      stone.absorb_codex(AstralVerse::LastRelicCache.last_relic)
+    rescue => e
+      puts "⚠️ Could not load cached relic: #{e.message}"
+    end
+  end
+
+  begin
+    require_relative '../lib/astral_verse/ui/crystal_window'
+    window = AstralVerse::CrystalWindow.new(stone)
+    window.show
+
+    # After window closes, check if user wants a new ROM
+    if window.needs_pick?
+      puts "📂 Opening Relic Explorer..."
+
+      require_relative '../lib/astral_verse/ui/file_browser'
+      last = AstralVerse::LastRelicCache.last_relic
+      browser = AstralVerse::UI::FileBrowser.new(last ? File.dirname(last) : Dir.home)
+      browser.show
+
+      if browser.selected_path
+        AstralVerse::LastRelicCache.save_relic(browser.selected_path)
+        # Loop will create a new stone with this ROM
+        next
+      else
+        puts "❌ No relic selected. The vault remains sealed."
+        break
+      end
+    else
+      # User pressed ESC without requesting new ROM
+      break
+    end
+  rescue Interrupt
     puts ""
-    print "Choice [y/n/q]: "
-    choice = $stdin.gets&.strip&.downcase
-
-    case choice
-    when 'y', 'yes'
-      relic_path = last
-    when 'q', 'quit'
-      exit 0
-    else
-      # Fall through to browser
-    end
+    puts "✨ Interrupted by cosmic forces."
+    break
+  rescue => e
+    puts ""
+    puts "💥 A rift in the astral veil!"
+    puts "   #{e.class}: #{e.message}"
+    puts e.backtrace.first(3).map { |l| "   #{l}" }.join("\n")
+    break
   end
-
-  unless relic_path
-    puts "🔮 Opening the Relic Explorer..."
-    require_relative '../lib/astral_verse/ui/file_browser'
-    browser = AstralVerse::UI::FileBrowser.new(AstralVerse::LastRelicCache.last_dir)
-    browser.show
-
-    if browser.selected_path
-      relic_path = browser.selected_path
-      AstralVerse::LastRelicCache.save_relic(relic_path)
-    else
-      puts "❌ No relic chosen. The vault remains sealed."
-      exit 0
-    end
-  end
-else
-  relic_path = ARGV[0]
-
-  unless File.exist?(relic_path)
-    puts "The relic '#{relic_path}' was not found in the mortal realm."
-    exit 1
-  end
-
-  AstralVerse::LastRelicCache.save_relic(relic_path)
 end
 
-stone = AstralVerse::ScryingStone.new
-stone.absorb_codex(relic_path)
-
-puts "The Scrying Stone attunes to the relic..."
-puts "   #{relic_path}"
-puts "Press SPACE to suspend/resume the vision."
-puts "Press R to re-attune the stone."
-puts "Press ESC to shatter the crystal and return."
 puts ""
-
-stone.awaken
-
-puts ""
-puts "✨ The Scrying Stone has been sealed."
+puts "👋 The Scrying Stone has been sealed."

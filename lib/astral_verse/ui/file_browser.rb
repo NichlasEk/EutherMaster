@@ -375,12 +375,10 @@ module AstralVerse
       end
 
       def wheel_up
-        # Mouse wheel up = scroll up
         move_selection(-3)
       end
 
       def wheel_down
-        # Mouse wheel down = scroll down
         move_selection(3)
       end
 
