@@ -7,7 +7,7 @@ module SmsEmulator
     # VDP registers
     NUM_REGISTERS = 11
 
-    attr_reader :registers, :vram, :cram, :framebuffer
+    attr_reader :registers, :vram, :cram, :framebuffer, :render_version
     attr_accessor :irq_line
 
     def initialize
@@ -21,7 +21,10 @@ module SmsEmulator
       @code_register = 0
       @v_counter = 0
       @h_counter = 0
+      @line_counter = 0
       @write_pending = false
+      @video_dirty = true
+      @render_version = 0
     end
 
     def reset
@@ -35,7 +38,10 @@ module SmsEmulator
       @code_register = 0
       @v_counter = 0
       @h_counter = 0
+      @line_counter = 0
       @write_pending = false
+      @video_dirty = true
+      @render_version = 0
     end
 
     # CPU I/O port $BE - VDP data port (read/write)
@@ -53,9 +59,12 @@ module SmsEmulator
       if @code_register == 3
         # CRAM write
         cram_addr = @addr_latch & 0x1F
+        @video_dirty = true if @cram[cram_addr] != value
         @cram[cram_addr] = value
       else
-        @vram[@addr_latch || 0] = value
+        vram_addr = @addr_latch || 0
+        @video_dirty = true if @vram[vram_addr] != value
+        @vram[vram_addr] = value
       end
 
       increment_address
@@ -65,20 +74,19 @@ module SmsEmulator
     # Also used to set VRAM address and register writes
     def write_control(value)
       if @write_pending
-        # Second write: upper byte with command
+        # Second write: upper byte with command/register selector.
         @code_register = (value >> 6) & 0x03
-        addr_high = value & 0x3F
-        @addr_latch = (@addr_latch || 0) | (addr_high << 8)
+        latched = @addr_latch || 0
 
-        if @code_register == 0 || @code_register == 1 || @code_register == 2 || @code_register == 3
-          # VRAM/CRAM access mode set
-        elsif @code_register == 2
-          # VDP register write
-          reg_num = (value >> 8) & 0x0F
+        if @code_register == 2
+          reg_num = value & 0x0F
           if reg_num < NUM_REGISTERS
-            @registers[reg_num] = @addr_latch & 0xFF
+            @video_dirty = true if @registers[reg_num] != (latched & 0xFF)
+            @registers[reg_num] = latched & 0xFF
           end
           @addr_latch = 0
+        else
+          @addr_latch = (latched | ((value & 0x3F) << 8)) & 0x3FFF
         end
         @write_pending = false
       else
@@ -93,6 +101,7 @@ module SmsEmulator
       temp = @status
       @status &= 0x1F  # Clear interrupt flags
       @irq_line = false
+      @line_counter = @registers[10] & 0xFF
       temp
     end
 
@@ -114,13 +123,190 @@ module SmsEmulator
     def render_scanline(scanline)
       return unless scanline < SMS_HEIGHT
 
-      # Simple placeholder: fill with background color
-      bg_color = @cram[0] || 0
-      SMS_WIDTH.times do |x|
-        @framebuffer[scanline * SMS_WIDTH + x] = bg_color
+      @v_counter = scanline
+      unless display_enabled?
+        backdrop = @cram[(@registers[7] & 0x0F) | 0x10] || 0
+        SMS_WIDTH.times { |x| @framebuffer[scanline * SMS_WIDTH + x] = backdrop }
+        return
       end
 
-      # TODO: Sprite rendering, tilemap rendering
+      render_background_scanline(scanline)
+      render_sprite_scanline(scanline)
+      blank_left_column(scanline) if left_column_blank?
+    end
+
+    def render_background_scanline(scanline)
+      name_base = (@registers[2] & 0x0E) << 10
+      y_scroll = (@registers[9] || 0) & 0xFF
+      x_scroll = (@registers[8] || 0) & 0xFF
+      source_y = (scanline + y_scroll) & 0xFF
+      tile_row = (source_y / 8) & 0x1F
+      row_in_tile = source_y & 7
+      row_offset = scanline * SMS_WIDTH
+
+      33.times do |screen_tile|
+        screen_x = screen_tile * 8
+        source_x = (screen_x - x_scroll) & 0xFF
+        tile_col = (source_x / 8) & 0x1F
+        first_col = source_x & 7
+        entry_addr = (name_base + ((tile_row * 32 + tile_col) * 2)) & 0x3FFF
+        entry = @vram[entry_addr] | ((@vram[(entry_addr + 1) & 0x3FFF] || 0) << 8)
+        tile_index = entry & 0x01FF
+        palette = (entry & 0x0800) != 0 ? 16 : 0
+        h_flip = (entry & 0x0200) != 0
+        v_flip = (entry & 0x0400) != 0
+        py = v_flip ? 7 - row_in_tile : row_in_tile
+        pattern_base = (tile_index * 32 + py * 4) & 0x3FFF
+        b0 = @vram[pattern_base]
+        b1 = @vram[(pattern_base + 1) & 0x3FFF]
+        b2 = @vram[(pattern_base + 2) & 0x3FFF]
+        b3 = @vram[(pattern_base + 3) & 0x3FFF]
+
+        8.times do |pixel_in_tile|
+          x = screen_x + pixel_in_tile
+          next if x >= SMS_WIDTH
+
+          col = (first_col + pixel_in_tile) & 7
+          px = h_flip ? 7 - col : col
+          bit = 7 - px
+          color_index = ((b0 >> bit) & 1) |
+            (((b1 >> bit) & 1) << 1) |
+            (((b2 >> bit) & 1) << 2) |
+            (((b3 >> bit) & 1) << 3)
+          @framebuffer[row_offset + x] = @cram[(palette + color_index) & 0x1F] || 0
+        end
+      end
+    end
+
+    def render_sprite_scanline(scanline)
+      sprite_height = sprite_16px? ? 16 : 8
+      zoom = sprite_zoom? ? 2 : 1
+      drawn_on_line = 0
+      occupied = Array.new(SMS_WIDTH, false)
+
+      64.times do |sprite_index|
+        attr_addr = (sprite_attribute_base + sprite_index) & 0x3FFF
+        y = @vram[attr_addr] || 0
+        break if y == 0xD0
+
+        y = (y + 1) & 0xFF
+        y -= 256 if y > 240
+        next unless scanline >= y && scanline < y + sprite_height * zoom
+
+        drawn_on_line += 1
+        @status |= 0x40 if drawn_on_line > 8
+        next if drawn_on_line > 8
+
+        entry_addr = (sprite_attribute_base + 0x80 + sprite_index * 2) & 0x3FFF
+        x = @vram[entry_addr] || 0
+        tile = @vram[(entry_addr + 1) & 0x3FFF] || 0
+        x -= 8 if (@registers[0] & 0x08) != 0
+        row = (scanline - y) / zoom
+        tile &= 0xFE if sprite_16px?
+        tile += 1 if row >= 8
+        row &= 7
+        tile = (tile + sprite_pattern_offset) & 0x1FF
+
+        8.times do |col|
+          color_index = pattern_pixel(tile, col, row)
+          next if color_index == 0
+
+          zoom.times do |zx|
+            px = x + col * zoom + zx
+            next if px.negative? || px >= SMS_WIDTH
+
+            @status |= 0x20 if occupied[px]
+            occupied[px] = true
+            @framebuffer[scanline * SMS_WIDTH + px] = @cram[(16 + color_index) & 0x1F] || 0
+          end
+        end
+      end
+    end
+
+    def render_frame
+      begin_frame
+      262.times { |scanline| step_scanline(scanline, render: true) }
+    end
+
+    def begin_frame
+      @status &= 0x1F
+      @irq_line = false
+      @line_counter = @registers[10] & 0xFF
+    end
+
+    def step_scanline(scanline, render: true)
+      @v_counter = scanline & 0xFF
+
+      if scanline < SMS_HEIGHT
+        render_scanline(scanline) if render
+        clock_line_interrupt
+      elsif scanline == SMS_HEIGHT
+        @status |= 0x80
+        @irq_line = true if frame_irq_enabled?
+      end
+    end
+
+    def render_visible_frame
+      return unless @video_dirty
+
+      SMS_HEIGHT.times { |scanline| render_scanline(scanline) }
+      @video_dirty = false
+      @render_version += 1
+    end
+
+    def clock_line_interrupt
+      if @line_counter.zero?
+        @line_counter = @registers[10] & 0xFF
+        @irq_line = true if line_irq_enabled?
+      else
+        @line_counter = (@line_counter - 1) & 0xFF
+      end
+    end
+
+    def pattern_pixel(tile_index, x, y)
+      base = (tile_index * 32 + y * 4) & 0x3FFF
+      bit = 7 - x
+      ((@vram[base] >> bit) & 1) |
+        (((@vram[(base + 1) & 0x3FFF] >> bit) & 1) << 1) |
+        (((@vram[(base + 2) & 0x3FFF] >> bit) & 1) << 2) |
+        (((@vram[(base + 3) & 0x3FFF] >> bit) & 1) << 3)
+    end
+
+    def sprite_attribute_base
+      (@registers[5] & 0x7E) << 7
+    end
+
+    def sprite_pattern_offset
+      (@registers[6] & 0x04) != 0 ? 0x100 : 0
+    end
+
+    def sprite_16px?
+      (@registers[1] & 0x02) != 0
+    end
+
+    def sprite_zoom?
+      (@registers[1] & 0x01) != 0
+    end
+
+    def display_enabled?
+      (@registers[1] & 0x40) != 0
+    end
+
+    def left_column_blank?
+      (@registers[0] & 0x20) != 0
+    end
+
+    def frame_irq_enabled?
+      (@registers[1] & 0x20) != 0
+    end
+
+    def line_irq_enabled?
+      (@registers[0] & 0x10) != 0
+    end
+
+    def blank_left_column(scanline)
+      backdrop = @cram[(@registers[7] & 0x0F) | 0x10] || 0
+      8.times { |x| @framebuffer[scanline * SMS_WIDTH + x] = backdrop }
     end
 
     # Dump framebuffer to ChunkyPNG image (for debugging)

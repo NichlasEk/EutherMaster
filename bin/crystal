@@ -1,13 +1,13 @@
 #!/usr/bin/env ruby
 
+require 'rbconfig'
+
 # ── Wayland / HiDPI Setup ─────────────────────────────
-# Detect Wayland session and configure SDL for native Wayland
+# Prefer the compositor-native SDL backend. The UI now uses actual window
+# dimensions, so native Wayland's logical coordinates are what we want.
 if ENV['WAYLAND_DISPLAY'] || ENV['XDG_SESSION_TYPE'] == 'wayland'
-  ENV['SDL_VIDEODRIVER'] = 'wayland'
-  # Request display scale from compositor (GNOME/KDE)
-  ENV['GDK_BACKEND'] = 'wayland'
-  ENV['QT_QPA_PLATFORM'] = 'wayland'
-  puts "🌊 Wayland session detected — using native Wayland backend"
+  ENV['SDL_VIDEODRIVER'] ||= ENV.fetch('ASTRAL_SDL_BACKEND', 'wayland')
+  puts "🌊 Wayland session detected — using SDL #{ENV['SDL_VIDEODRIVER']} backend"
 end
 
 require_relative '../lib/astral_verse'
@@ -19,6 +19,14 @@ puts
 
 loop do
   stone = AstralVerse::ScryingStone.new
+  armed_relic = AstralVerse::LastRelicCache.last_relic
+  if armed_relic
+    begin
+      stone.absorb_codex(armed_relic)
+    rescue => e
+      puts "⚠️ Could not arm cached relic: #{e.message}"
+    end
+  end
 
   begin
     require_relative '../lib/astral_verse/ui/crystal_window'
@@ -36,7 +44,8 @@ loop do
 
       if browser.selected_path
         AstralVerse::LastRelicCache.save_relic(browser.selected_path)
-        next  # Restart loop with new ROM loaded
+        puts "💎 Armed relic: #{File.basename(browser.selected_path)}"
+        exec({ 'ASTRAL_RESTARTED_AFTER_PICK' => '1' }, RbConfig.ruby, $PROGRAM_NAME, *ARGV)
       else
         puts "❌ No relic selected."
         break

@@ -14,10 +14,11 @@ module AstralVerse
       { label: "📂 Open",  x: 10,  w: 100, action: :open_relic },
       { label: "▶ Start",  x: 120, w: 100, action: :start },
       { label: "⏹ Stop",   x: 230, w: 100, action: :stop },
+      { label: "⛶ Full",   x: 340, w: 100, action: :fullscreen },
     ].freeze
 
     def initialize(stone)
-      super(WIDTH, HEIGHT, false)
+      super(WIDTH, HEIGHT, resizable: true)
       self.caption = "AstralVerse Scrying Stone - Ruby"
       @stone = stone
       @last_vision = Gosu.milliseconds
@@ -31,6 +32,16 @@ module AstralVerse
       @font_small = Gosu::Font.new(12, name: "Courier New")
       @frame_count = 0
       @hover_button = nil
+      @fullscreen_shortcut_down = false
+      @frame_image = nil
+      @framebuffer_object_id = nil
+      @framebuffer_signature = nil
+      @sms_palette_rgba = Array.new(64) do |value|
+        r = ((value >> 0) & 0x03) * 85
+        g = ((value >> 2) & 0x03) * 85
+        b = ((value >> 4) & 0x03) * 85
+        [r, g, b, 255].pack('C4')
+      end
     end
 
     def update
@@ -44,8 +55,10 @@ module AstralVerse
 
       if delta >= @vision_interval && @running
         if @stone.instance_variable_get(:@codex_present)
+          sync_game_input_state
           @stone.gaze_frame
           @frame_count += 1
+          refresh_frame_image
           @last_vision = now
         else
           # No ROM loaded, auto-stop
@@ -67,40 +80,34 @@ module AstralVerse
     end
 
     def draw
-      draw_area_top = TOOLBAR_HEIGHT
+      viewport = screen_viewport
+      Gosu.draw_rect(0, TOOLBAR_HEIGHT, width, content_height, Gosu::Color.new(255, 18, 12, 28))
 
       # Main framebuffer area
       if @stone.vision_sprite.scrying_pool && !@stone.vision_sprite.scrying_pool.empty? && @stone.instance_variable_get(:@codex_present)
-        VisionSprite::POOL_HEIGHT.times do |thread|
-          VisionSprite::POOL_WIDTH.times do |rune|
-            idx = thread * VisionSprite::POOL_WIDTH + rune
-            next if idx >= @stone.vision_sprite.scrying_pool.length
-            aura = @stone.vision_sprite.scrying_pool[idx] || 0
-            r = ((aura >> 0) & 0x03) * 85
-            g = ((aura >> 2) & 0x03) * 85
-            b = ((aura >> 4) & 0x03) * 85
-            Gosu.draw_rect(rune * MAGNIFY, draw_area_top + thread * MAGNIFY, MAGNIFY, MAGNIFY, Gosu::Color.new(255, r, g, b))
-          end
-        end
+        refresh_frame_image unless @frame_image
+        @frame_image&.draw(viewport[:x], viewport[:y], 1, viewport[:scale], viewport[:scale])
       else
         # No ROM or blank screen
-        Gosu.draw_rect(0, draw_area_top, DRAW_WIDTH, DRAW_HEIGHT, Gosu::Color.new(255, 18, 12, 28))
-
         if !@stone.instance_variable_get(:@codex_present)
-          # No ROM armed
-          msg = "No relic armed"
-          msg_x = DRAW_WIDTH / 2 - @font.text_width(msg) / 2
-          msg_y = draw_area_top + DRAW_HEIGHT / 2 - 30
+          if armed_relic_path
+            msg = "Armed: #{armed_relic_name(42)}"
+            hint = "Click Start to run"
+          else
+            msg = "No relic armed"
+            hint = "Click Open to select a ROM"
+          end
+          msg_x = width / 2 - @font.text_width(msg) / 2
+          msg_y = TOOLBAR_HEIGHT + content_height / 2 - 30
           @font.draw_text(msg, msg_x, msg_y, 10, 1, 1, Gosu::Color.new(255, 180, 150, 220))
 
-          hint = "Click Open to select a ROM"
-          hint_x = DRAW_WIDTH / 2 - @font.text_width(hint) / 2
+          hint_x = width / 2 - @font.text_width(hint) / 2
           @font.draw_text(hint, hint_x, msg_y + 26, 10, 1, 1, Gosu::Color.new(255, 120, 100, 160))
         else
           # ROM loaded but framebuffer empty
           msg = "Scrying pool is dark..."
-          msg_x = DRAW_WIDTH / 2 - @font.text_width(msg) / 2
-          msg_y = draw_area_top + DRAW_HEIGHT / 2 - 20
+          msg_x = width / 2 - @font.text_width(msg) / 2
+          msg_y = TOOLBAR_HEIGHT + content_height / 2 - 20
           @font.draw_text(msg, msg_x, msg_y, 10, 1, 1, Gosu::Color.new(255, 150, 140, 190))
         end
       end
@@ -109,16 +116,22 @@ module AstralVerse
       draw_toolbar
 
       # Status bar at bottom
-      bar_y = DRAW_HEIGHT + TOOLBAR_HEIGHT
-      Gosu.draw_rect(0, bar_y, WIDTH, STATUS_BAR, Gosu::Color.new(255, 22, 16, 38))
-      Gosu.draw_rect(0, bar_y, WIDTH, 1, Gosu::Color.new(255, 80, 60, 120))
+      bar_y = height - STATUS_BAR
+      Gosu.draw_rect(0, bar_y, width, STATUS_BAR, Gosu::Color.new(255, 22, 16, 38))
+      Gosu.draw_rect(0, bar_y, width, 1, Gosu::Color.new(255, 80, 60, 120))
 
       # Left: armed ROM info or status
-      if @stone.instance_variable_get(:@codex_present)
-        armed_name = File.basename(@stone.crystal_vault.relic_path || "unknown")
-        armed_name = armed_name[0..20] + "..." if armed_name.length > 23
+      if armed_relic_path
+        armed_name = armed_relic_name(23)
         status_text = "#{@running ? '▶' : '⏸'} Frame: #{@frame_count} | #{armed_name}"
-        status_color = @running ? Gosu::Color.new(255, 100, 255, 100) : Gosu::Color.new(255, 255, 200, 100)
+        status_text = "#{status_text} | #{perf_label}" if @running
+        status_color = if @running
+          Gosu::Color.new(255, 100, 255, 100)
+        elsif @stone.instance_variable_get(:@codex_present)
+          Gosu::Color.new(255, 255, 200, 100)
+        else
+          Gosu::Color.new(255, 190, 170, 130)
+        end
       else
         status_text = "⏹ No relic armed"
         status_color = Gosu::Color.new(255, 255, 100, 100)
@@ -128,23 +141,21 @@ module AstralVerse
       # Right: controls hint
       hint = "ESC = Exit | Arrows+Z/X = Input"
       hint_w = @font_small.text_width(hint)
-      @font_small.draw_text(hint, WIDTH - hint_w - 8, bar_y + 7, 10, 1, 1, Gosu::Color.new(255, 140, 130, 180))
+      @font_small.draw_text(hint, width - hint_w - 8, bar_y + 7, 10, 1, 1, Gosu::Color.new(255, 140, 130, 180))
     end
 
     def draw_toolbar
       # Toolbar background
-      Gosu.draw_rect(0, 0, WIDTH, TOOLBAR_HEIGHT, Gosu::Color.new(255, 32, 24, 55))
-      Gosu.draw_rect(0, TOOLBAR_HEIGHT - 1, WIDTH, 1, Gosu::Color.new(255, 90, 70, 140))
+      Gosu.draw_rect(0, 0, width, TOOLBAR_HEIGHT, Gosu::Color.new(255, 32, 24, 55))
+      Gosu.draw_rect(0, TOOLBAR_HEIGHT - 1, width, 1, Gosu::Color.new(255, 90, 70, 140))
 
       # Armed ROM label (right side of toolbar)
-      if @stone.instance_variable_get(:@codex_present)
-        armed = File.basename(@stone.crystal_vault.relic_path || "unknown")
-        armed = armed[0..18] + "..." if armed.length > 21
-        label = "💎 Armed: #{armed}"
+      if armed_relic_path
+        label = "💎 Armed: #{armed_relic_name(21)}"
       else
         label = "💎 Armed: None"
       end
-      label_x = WIDTH - @font_tool.text_width(label) - 12
+      label_x = width - @font_tool.text_width(label) - 12
       @font_tool.draw_text(label, label_x, 9, 10, 1, 1, Gosu::Color.new(255, 180, 150, 100))
 
       # Buttons
@@ -178,6 +189,14 @@ module AstralVerse
     end
 
     def button_down(id)
+      if fullscreen_shortcut?(id)
+        unless @fullscreen_shortcut_down
+          toggle_fullscreen
+          @fullscreen_shortcut_down = true
+        end
+        return
+      end
+
       case id
       when Gosu::MsLeft
         mx, my = mouse_x, mouse_y
@@ -195,6 +214,9 @@ module AstralVerse
               when :stop
                 @running = false
                 @frame_count = 0
+                return
+              when :fullscreen
+                toggle_fullscreen
                 return
               end
             end
@@ -223,12 +245,65 @@ module AstralVerse
       end
     end
 
+    def toggle_fullscreen
+      self.fullscreen = !fullscreen?
+    end
+
+    def alt_down?
+      button_down?(Gosu::KB_LEFT_ALT) || button_down?(Gosu::KB_RIGHT_ALT)
+    end
+
+    def shift_down?
+      button_down?(Gosu::KB_LEFT_SHIFT) || button_down?(Gosu::KB_RIGHT_SHIFT)
+    end
+
+    def fullscreen_shortcut?(id)
+      return true if id == Gosu::KB_F11
+
+      fullscreen_shortcut_key?(id) && alt_down? && shift_down?
+    end
+
+    def fullscreen_shortcut_key?(id)
+      [Gosu::KB_F11, Gosu::KB_RETURN, Gosu::KB_ENTER].include?(id)
+    end
+
+    def content_height
+      [height - TOOLBAR_HEIGHT - STATUS_BAR, 1].max
+    end
+
+    def screen_viewport
+      scale = [width.to_f / VisionSprite::POOL_WIDTH, content_height.to_f / VisionSprite::POOL_HEIGHT].min
+      scale = [scale, 0.1].max
+      draw_width = VisionSprite::POOL_WIDTH * scale
+      draw_height = VisionSprite::POOL_HEIGHT * scale
+      {
+        x: (width - draw_width) / 2.0,
+        y: TOOLBAR_HEIGHT + (content_height - draw_height) / 2.0,
+        scale: scale
+      }
+    end
+
+    def refresh_frame_image
+      framebuffer = @stone.vision_sprite.scrying_pool
+      return unless framebuffer && framebuffer.length >= VisionSprite::POOL_WIDTH * VisionSprite::POOL_HEIGHT
+
+      signature = [framebuffer.object_id, @stone.emulator.vdp.render_version]
+      return if @frame_image && @framebuffer_signature == signature
+
+      rgba = String.new(capacity: VisionSprite::POOL_WIDTH * VisionSprite::POOL_HEIGHT * 4, encoding: Encoding::BINARY)
+      framebuffer.each do |value|
+        rgba << @sms_palette_rgba[(value || 0) & 0x3F]
+      end
+      @frame_image = Gosu::Image.from_blob(VisionSprite::POOL_WIDTH, VisionSprite::POOL_HEIGHT, rgba)
+      @framebuffer_signature = signature
+    end
+
     def toggle_start
       if !@stone.instance_variable_get(:@codex_present)
         # Try to load armed ROM
-        if AstralVerse::LastRelicCache.last_relic && File.exist?(AstralVerse::LastRelicCache.last_relic)
+        if armed_relic_path
           begin
-            @stone.absorb_codex(AstralVerse::LastRelicCache.last_relic)
+            @stone.absorb_codex(armed_relic_path)
             @running = true
           rescue => e
             puts "⚠️ Could not load armed relic: #{e.message}"
@@ -251,6 +326,8 @@ module AstralVerse
     end
 
     def button_up(id)
+      @fullscreen_shortcut_down = false if fullscreen_shortcut_key?(id)
+
       return unless @running
       touch = @stone.mystic_touch
       case id
@@ -261,6 +338,41 @@ module AstralVerse
       when Gosu::KB_Z     then touch.release(MysticTouch::GESTURE_PRIMUS)
       when Gosu::KB_X     then touch.release(MysticTouch::GESTURE_SECUNDUS)
       end
+    end
+
+    def sync_game_input_state
+      touch = @stone.mystic_touch
+      touch.left_palm = 0xFF
+      touch.right_palm = 0xFF
+
+      touch.invoke(MysticTouch::GESTURE_NORTH) if button_down?(Gosu::KB_UP)
+      touch.invoke(MysticTouch::GESTURE_SOUTH) if button_down?(Gosu::KB_DOWN)
+      touch.invoke(MysticTouch::GESTURE_WEST) if button_down?(Gosu::KB_LEFT)
+      touch.invoke(MysticTouch::GESTURE_EAST) if button_down?(Gosu::KB_RIGHT)
+
+      primary_down = button_down?(Gosu::KB_Z) || button_down?(Gosu::KB_A) ||
+        button_down?(Gosu::KB_RETURN) || button_down?(Gosu::KB_ENTER)
+      secondary_down = button_down?(Gosu::KB_X) || button_down?(Gosu::KB_S)
+
+      touch.invoke(MysticTouch::GESTURE_PRIMUS) if primary_down
+      touch.invoke(MysticTouch::GESTURE_SECUNDUS) if secondary_down
+    end
+
+    def armed_relic_path
+      loaded_path = @stone.crystal_vault.relic_path
+      return loaded_path if loaded_path && File.exist?(loaded_path)
+
+      AstralVerse::LastRelicCache.last_relic
+    end
+
+    def armed_relic_name(max_length)
+      name = File.basename(armed_relic_path || "unknown")
+      name.length > max_length ? "#{name[0...(max_length - 3)]}..." : name
+    end
+
+    def perf_label
+      perf = @stone.emulator.perf_summary
+      "emu %.1f fps cpu %.1fms vdp %.1fms" % [perf[:fps], perf[:avg_cpu_ms], perf[:avg_vdp_ms]]
     end
   end
 end

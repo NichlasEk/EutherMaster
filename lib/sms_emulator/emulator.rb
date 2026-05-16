@@ -83,7 +83,7 @@ module SmsEmulator
   end
 
   class Emulator
-    attr_reader :cpu, :vdp, :memory, :controller
+    attr_reader :cpu, :vdp, :memory, :controller, :frame_count, :perf
 
     # Master System runs Z80 at ~3.58 MHz, VDP at ~10.7 MHz
     # Frame: 262 scanlines (NTSC), 313 scanlines (PAL)
@@ -91,12 +91,13 @@ module SmsEmulator
     CYCLES_PER_SCANLINE = 228
 
     def initialize
-      @memory = Memory.new
-      @cpu = Z80.new(@memory)
       @vdp = VDP.new
       @controller = Controller.new
+      @memory = Memory.new(@vdp, @controller)
+      @cpu = Z80.new(@memory)
       @frame_count = 0
       @rom_loaded = false
+      reset_perf
     end
 
     def load_rom(path)
@@ -116,33 +117,88 @@ module SmsEmulator
       @vdp.reset
       @controller.reset
       @frame_count = 0
+      reset_perf
     end
 
     def run_frame
       return unless @rom_loaded
 
+      frame_started = monotonic_time
+      cpu_started = frame_started
       cycles_this_frame = 0
-      scanline = 0
+      steps_this_frame = 0
+      @vdp.begin_frame
 
-      while cycles_this_frame < CYCLES_PER_FRAME
-        cycles = @cpu.step
-        cycles_this_frame += cycles
+      262.times do |scanline|
+        target_cycles = (scanline + 1) * CYCLES_PER_SCANLINE
 
-        # Update VDP / scanline timing
-        scanline += (cycles / CYCLES_PER_SCANLINE)
+        while cycles_this_frame < target_cycles
+          cycles = @cpu.step
+          cycles = 4 if cycles <= 0
+          cycles_this_frame += cycles
+          steps_this_frame += 1
 
-        if scanline >= 262
-          scanline = 0
-          @vdp.irq_line = true
+          if @vdp.irq_line && @cpu.iff1
+            cycles_this_frame += @cpu.interrupt
+          end
         end
 
-        # Trigger VDP interrupt
-        if @vdp.irq_line && @cpu.iff1
-          @cpu.interrupt
-        end
+        @vdp.step_scanline(scanline, render: false)
       end
 
+      cpu_finished = monotonic_time
+      @vdp.render_visible_frame
+      vdp_finished = monotonic_time
       @frame_count += 1
+      record_perf(cpu_finished - cpu_started, vdp_finished - cpu_finished, vdp_finished - frame_started, steps_this_frame)
+    end
+
+    def reset_perf
+      @perf = {
+        frames: 0,
+        cpu_seconds: 0.0,
+        vdp_seconds: 0.0,
+        frame_seconds: 0.0,
+        cpu_steps: 0,
+        last_frame_ms: 0.0,
+        last_cpu_ms: 0.0,
+        last_vdp_ms: 0.0,
+        last_cpu_steps: 0
+      }
+    end
+
+    def perf_summary
+      frames = [@perf[:frames], 1].max
+      {
+        frames: @perf[:frames],
+        fps: @perf[:frame_seconds] > 0 ? @perf[:frames] / @perf[:frame_seconds] : 0.0,
+        avg_frame_ms: (@perf[:frame_seconds] / frames) * 1000.0,
+        avg_cpu_ms: (@perf[:cpu_seconds] / frames) * 1000.0,
+        avg_vdp_ms: (@perf[:vdp_seconds] / frames) * 1000.0,
+        avg_cpu_steps: @perf[:cpu_steps] / frames.to_f,
+        last_frame_ms: @perf[:last_frame_ms],
+        last_cpu_ms: @perf[:last_cpu_ms],
+        last_vdp_ms: @perf[:last_vdp_ms],
+        last_cpu_steps: @perf[:last_cpu_steps]
+      }
+    end
+
+    private
+
+    def monotonic_time
+      Process.clock_gettime(Process::CLOCK_MONOTONIC)
+    end
+
+    def record_perf(cpu_seconds, vdp_seconds, frame_seconds, cpu_steps)
+      @perf[:frames] += 1
+      @perf[:cpu_seconds] += cpu_seconds
+      @perf[:vdp_seconds] += vdp_seconds
+      @perf[:frame_seconds] += frame_seconds
+      @perf[:cpu_steps] += cpu_steps
+      @perf[:last_cpu_ms] = cpu_seconds * 1000.0
+      @perf[:last_vdp_ms] = vdp_seconds * 1000.0
+      @perf[:last_frame_ms] = frame_seconds * 1000.0
+      @perf[:last_cpu_steps] = cpu_steps
     end
 
     def run
