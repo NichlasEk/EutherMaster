@@ -272,18 +272,28 @@ module AstralVerse
            @font_small.draw_text(entry[:size], list_left + list_width - 140, y + 14, 1, 1, 1, COLORS[:dim_text])
         end
 
-        # Scroll indicator
+        # Scroll indicator - WIDE and OBVIOUS
         if @entries.length > @visible_count
           ratio = @visible_count.to_f / @entries.length
           bar_h = ratio * list_height
           bar_y = list_top + (@scroll.to_f / @entries.length) * list_height
-          @scrollbar_track = { x: list_left + list_width + 5, y: list_top, w: 16, h: list_height }
-          @scrollbar_thumb = { x: list_left + list_width + 5, y: bar_y, w: 16, h: [bar_h, 30].max }
-          # Draw track
-          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], @scrollbar_track[:h], Gosu::Color.new(255, 30, 20, 50))
-          # Draw thumb
-          thumb_color = @scroll_dragging ? COLORS[:accent] : COLORS[:border]
-          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], @scrollbar_thumb[:h].to_i, thumb_color)
+          
+          # Make scrollbar very wide and obvious (40px)
+          @scrollbar_track = { x: list_left + list_width + 15, y: list_top, w: 40, h: list_height }
+          @scrollbar_thumb = { x: list_left + list_width + 15, y: bar_y, w: 40, h: [bar_h, 40].max }
+          
+          # Draw track - semi-transparent background
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], @scrollbar_track[:h], Gosu::Color.new(255, 40, 30, 70))
+          # Draw border around track
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], 2, COLORS[:border])
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y] + @scrollbar_track[:h] - 2, @scrollbar_track[:w], 2, COLORS[:border])
+          
+          # Draw thumb - bright color
+          thumb_bg = @scroll_dragging ? Gosu::Color.new(255, 140, 120, 200) : Gosu::Color.new(255, 100, 80, 160)
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], @scrollbar_thumb[:h].to_i, thumb_bg)
+          # Thumb border
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], 2, Gosu::Color::WHITE)
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i + @scrollbar_thumb[:h].to_i - 2, @scrollbar_thumb[:w], 2, Gosu::Color::WHITE)
         else
           @scrollbar_track = nil
           @scrollbar_thumb = nil
@@ -317,8 +327,12 @@ module AstralVerse
       def button_down(id)
         case id
         when Gosu::MsLeft
+          # Debug: show click position
+          puts "[DEBUG] Click at #{mouse_x}, #{mouse_y}"
+          
           # Check if clicking on scrollbar
           if hit_scrollbar?(mouse_x, mouse_y)
+            puts "[DEBUG] Hit scrollbar!"
             @scroll_dragging = true
             @scroll_drag_start_y = mouse_y
             @scroll_drag_start_scroll = @scroll
@@ -385,6 +399,15 @@ module AstralVerse
         true
       end
 
+      def hit_scrollbar?(mx, my)
+        return false unless @scrollbar_track && @scrollbar_thumb
+        track_hit = mx >= @scrollbar_track[:x] && mx <= @scrollbar_track[:x] + @scrollbar_track[:w] &&
+                    my >= @scrollbar_track[:y] && my <= @scrollbar_track[:y] + @scrollbar_track[:h]
+        thumb_hit = mx >= @scrollbar_thumb[:x] && mx <= @scrollbar_thumb[:x] + @scrollbar_thumb[:w] &&
+                    my >= @scrollbar_thumb[:y] && my <= @scrollbar_thumb[:y] + @scrollbar_thumb[:h]
+        track_hit || thumb_hit
+      end
+
       def update_scroll_from_drag(y)
         return unless @entries.length > @visible_count
         list_top = HEADER_HEIGHT + 10
@@ -397,6 +420,7 @@ module AstralVerse
         @scroll = [@scroll, 0].max
         @scroll = [@scroll, max_scroll].min
         @selected = @scroll
+        puts "[DEBUG] Scroll from drag: y=#{y} scroll=#{@scroll}"
       end
 
       def handle_mouse_click(mx, my, click_type)
