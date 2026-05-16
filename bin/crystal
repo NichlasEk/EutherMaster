@@ -2,6 +2,11 @@
 
 require 'rbconfig'
 
+if defined?(RubyVM::YJIT) && RubyVM::YJIT.respond_to?(:enable) && !RubyVM::YJIT.enabled?
+  RubyVM::YJIT.enable
+  puts "⚡ Ruby YJIT enabled for emulator hot paths"
+end
+
 # ── Wayland / HiDPI Setup ─────────────────────────────
 # Prefer the compositor-native SDL backend. The UI now uses actual window
 # dimensions, so native Wayland's logical coordinates are what we want.

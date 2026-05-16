@@ -13,6 +13,8 @@ module SmsEmulator
       @controller = controller
       @psg = psg
       @mapper = [0, 0, 1, 2]
+      @bank_count = 1
+      @bank_offsets = [0, 0, 0x4000, 0x8000]
     end
 
     attr_accessor :vdp, :controller, :psg, :io_cycle
@@ -20,6 +22,8 @@ module SmsEmulator
     def load_rom(data)
       @cartridge = data.dup
       @mapper = [0, 0, 1, 2]
+      @bank_count = [(@cartridge.length + 0x3FFF) / 0x4000, 1].max
+      sync_bank_offsets
       @ram.fill(0)
       sync_mapper_ram
       @rom.fill(0)
@@ -39,15 +43,12 @@ module SmsEmulator
     def read_byte(addr)
       addr &= 0xFFFF
 
-      case addr
-      when 0x0000..0xBFFF
+      if addr < 0xC000
         read_rom(addr)
-      when 0xC000..0xDFFF
+      elsif addr < 0xE000
         @ram[addr - 0xC000] || 0
-      when 0xE000..0xFFFF
-        @ram[addr - 0xE000] || 0
       else
-        0
+        @ram[addr - 0xE000] || 0
       end
     end
 
@@ -60,14 +61,13 @@ module SmsEmulator
     def write_byte(addr, value)
       addr &= 0xFFFF
       value &= 0xFF
-      return write_mapper(addr, value) if (0xFFFC..0xFFFF).cover?(addr)
+      return write_mapper(addr, value) if addr >= 0xFFFC
 
-      case addr
-      when 0x0000..0xBFFF
+      if addr < 0xC000
         # ROM is read-only here.
-      when 0xC000..0xDFFF
+      elsif addr < 0xE000
         @ram[addr - 0xC000] = value
-      when 0xE000..0xFFFF
+      else
         @ram[addr - 0xE000] = value
       end
     end
@@ -80,21 +80,14 @@ module SmsEmulator
     def read_io(port)
       port &= 0xFF
 
-      case [port & 0x80 != 0, port & 0x40 != 0, port & 0x01 != 0]
-      when [false, false, false], [false, false, true]
-        0xFF
-      when [false, true, false]
-        @vdp ? @vdp.read_v_counter : 0xFF
-      when [false, true, true]
-        @vdp ? @vdp.read_h_counter : 0xFF
-      when [true, false, false]
-        @vdp ? @vdp.read_data : 0xFF
-      when [true, false, true]
-        @vdp ? @vdp.read_status : 0xFF
-      when [true, true, false]
-        @controller ? @controller.read_port_a : 0xFF
-      when [true, true, true]
-        @controller ? @controller.read_port_misc : 0xFF
+      if (port & 0x80) == 0
+        return 0xFF if (port & 0x40) == 0
+
+        (port & 0x01).zero? ? (@vdp ? @vdp.read_v_counter : 0xFF) : (@vdp ? @vdp.read_h_counter : 0xFF)
+      elsif (port & 0x40) == 0
+        (port & 0x01).zero? ? (@vdp ? @vdp.read_data : 0xFF) : (@vdp ? @vdp.read_status : 0xFF)
+      else
+        (port & 0x01).zero? ? (@controller ? @controller.read_port_a : 0xFF) : (@controller ? @controller.read_port_misc : 0xFF)
       end
     end
 
@@ -102,15 +95,14 @@ module SmsEmulator
       port &= 0xFF
       value &= 0xFF
 
-      case [port & 0x80 != 0, port & 0x40 != 0, port & 0x01 != 0]
-      when [false, false, true]
-        @controller&.write_control(value)
-      when [false, true, false], [false, true, true]
-        @psg&.write(value, port: port, cycle: @io_cycle)
-      when [true, false, false]
-        @vdp&.write_data(value)
-      when [true, false, true]
-        @vdp&.write_control(value)
+      if (port & 0x80) == 0
+        if (port & 0x40) == 0
+          @controller&.write_control(value) if (port & 0x01) != 0
+        else
+          @psg&.write(value, port: port, cycle: @io_cycle)
+        end
+      elsif (port & 0x40) == 0
+        (port & 0x01).zero? ? @vdp&.write_data(value) : @vdp&.write_control(value)
       end
     end
 
@@ -119,38 +111,44 @@ module SmsEmulator
     def read_rom(addr)
       return @rom[addr] || 0 unless @cartridge && @cartridge.length > ROM_SIZE
 
-      case addr
-      when 0x0000..0x03FF
+      if addr < 0x0400
         @cartridge[addr] || 0
-      when 0x0400..0x3FFF
-        read_bank(@mapper[1], addr - 0x0000)
-      when 0x4000..0x7FFF
-        read_bank(@mapper[2], addr - 0x4000)
-      when 0x8000..0xBFFF
-        read_bank(@mapper[3], addr - 0x8000)
+      elsif addr < 0x4000
+        read_bank_offset(@bank_offsets[1], addr)
+      elsif addr < 0x8000
+        read_bank_offset(@bank_offsets[2], addr - 0x4000)
+      else
+        read_bank_offset(@bank_offsets[3], addr - 0x8000)
       end
     end
 
-    def read_bank(bank, offset)
+    def read_bank_offset(bank_offset, offset)
       return 0 unless @cartridge && !@cartridge.empty?
 
-      bank_count = (@cartridge.length + 0x3FFF) / 0x4000
-      @cartridge[((bank % bank_count) * 0x4000 + offset) % @cartridge.length] || 0
+      @cartridge[(bank_offset + offset) % @cartridge.length] || 0
     end
 
     def write_mapper(addr, value)
+      index = addr - 0xFFFC
       case addr
       when 0xFFFC then @mapper[0] = value
       when 0xFFFD then @mapper[1] = value
       when 0xFFFE then @mapper[2] = value
       when 0xFFFF then @mapper[3] = value
       end
+      @bank_offsets[index] = (value % @bank_count) * 0x4000
       @ram[addr - 0xE000] = value
     end
 
     def sync_mapper_ram
       @mapper.each_with_index do |value, index|
         @ram[0x1FFC + index] = value
+      end
+    end
+
+    def sync_bank_offsets
+      @mapper.each_with_index do |value, index|
+        @bank_offsets[index] = (value % @bank_count) * 0x4000
       end
     end
   end

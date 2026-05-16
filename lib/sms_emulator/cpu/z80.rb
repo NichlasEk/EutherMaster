@@ -18,16 +18,7 @@ module SmsEmulator
     REG8 = [:b, :c, :d, :e, :h, :l, nil, :a].freeze
     RP = [:bc, :de, :hl, :sp].freeze
     RP2 = [:bc, :de, :hl, :af].freeze
-    CONDITIONS = [
-      ->(z) { !z.flag_z? },
-      ->(z) { z.flag_z? },
-      ->(z) { !z.flag_c? },
-      ->(z) { z.flag_c? },
-      ->(z) { !z.flag_p? },
-      ->(z) { z.flag_p? },
-      ->(z) { !z.flag_s? },
-      ->(z) { z.flag_s? }
-    ].freeze
+    PARITY = Array.new(256) { |value| value.to_s(2).count('1').even? ? FLAG_P : 0 }.freeze
 
     def initialize(memory)
       @memory = memory
@@ -116,7 +107,7 @@ module SmsEmulator
     end
 
     def execute_base(opcode, index)
-      if (0x40..0x7F).cover?(opcode)
+      if opcode >= 0x40 && opcode <= 0x7F
         return halt if opcode == 0x76
         dst = (opcode >> 3) & 7
         src = opcode & 7
@@ -128,7 +119,7 @@ module SmsEmulator
         return finish(ld_r_r_cycles(dst, src, index))
       end
 
-      if (0x80..0xBF).cover?(opcode)
+      if opcode >= 0x80 && opcode <= 0xBF
         op = (opcode >> 3) & 7
         src = opcode & 7
         alu(op, read_reg8(src, index))
@@ -200,7 +191,7 @@ module SmsEmulator
         end
       when 0x18 then jr(fetch_byte); finish(12)
       when 0x20, 0x28, 0x30, 0x38
-        cond = CONDITIONS[(opcode >> 3) & 3].call(self)
+        cond = condition_met((opcode >> 3) & 3)
         disp = fetch_byte
         jr(disp) if cond
         finish(cond ? 12 : 7)
@@ -221,15 +212,15 @@ module SmsEmulator
         @f = (@f & (FLAG_S | FLAG_Z | FLAG_P)) | (@a & FLAG_YX) | (old_c != 0 ? FLAG_H : 0) | (old_c != 0 ? 0 : FLAG_C)
         finish(4)
       when 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0, 0xF8
-        ret_cond(CONDITIONS[(opcode >> 3) & 7].call(self))
+        ret_cond(condition_met((opcode >> 3) & 7))
       when 0xC1, 0xD1, 0xE1, 0xF1
         set_rp2((opcode >> 4) & 3, pop_word, index)
         finish(index && opcode == 0xE1 ? 14 : 10)
       when 0xC2, 0xCA, 0xD2, 0xDA, 0xE2, 0xEA, 0xF2, 0xFA
-        jp_cond(CONDITIONS[(opcode >> 3) & 7].call(self))
+        jp_cond(condition_met((opcode >> 3) & 7))
       when 0xC3 then @pc = fetch_word; finish(10)
       when 0xC4, 0xCC, 0xD4, 0xDC, 0xE4, 0xEC, 0xF4, 0xFC
-        call_cond(CONDITIONS[(opcode >> 3) & 7].call(self))
+        call_cond(condition_met((opcode >> 3) & 7))
       when 0xC5, 0xD5, 0xE5, 0xF5
         push_word(get_rp2((opcode >> 4) & 3, index))
         finish(index && opcode == 0xE5 ? 15 : 11)
@@ -836,11 +827,24 @@ module SmsEmulator
     end
 
     def szp(value)
-      sz_flags(value) | (parity(value) ? FLAG_P : 0)
+      sz_flags(value) | PARITY[value & 0xFF]
     end
 
     def parity(value)
-      value.to_s(2).count('1').even?
+      (PARITY[value & 0xFF] & FLAG_P) != 0
+    end
+
+    def condition_met(condition)
+      case condition
+      when 0 then (@f & FLAG_Z) == 0
+      when 1 then (@f & FLAG_Z) != 0
+      when 2 then (@f & FLAG_C) == 0
+      when 3 then (@f & FLAG_C) != 0
+      when 4 then (@f & FLAG_P) == 0
+      when 5 then (@f & FLAG_P) != 0
+      when 6 then (@f & FLAG_S) == 0
+      when 7 then (@f & FLAG_S) != 0
+      end
     end
 
     def signed8(value)
