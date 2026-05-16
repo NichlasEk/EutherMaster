@@ -4,11 +4,11 @@
 # Detect Wayland session and configure SDL for native Wayland
 if ENV['WAYLAND_DISPLAY'] || ENV['XDG_SESSION_TYPE'] == 'wayland'
   ENV['SDL_VIDEODRIVER'] = 'wayland'
+  # Request display scale from compositor (GNOME/KDE)
+  ENV['GDK_BACKEND'] = 'wayland'
+  ENV['QT_QPA_PLATFORM'] = 'wayland'
   puts "🌊 Wayland session detected — using native Wayland backend"
 end
-
-# Optional: force high-DPI aware scaling
-ENV['GOSU_SCALE'] ||= '1.0'
 
 require_relative '../lib/astral_verse'
 

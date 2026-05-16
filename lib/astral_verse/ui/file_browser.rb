@@ -3,13 +3,13 @@ require 'gosu'
 module AstralVerse
   module UI
     class FileBrowser < Gosu::Window
-      WIDTH = 1600
-      HEIGHT = 1000
-      LINE_HEIGHT = 48
-      HEADER_HEIGHT = 120
-      FOOTER_HEIGHT = 70
-      MARGIN = 50
-      SIDEBAR_WIDTH = 300
+      WIDTH = 1200
+      HEIGHT = 800
+      LINE_HEIGHT = 72
+      HEADER_HEIGHT = 140
+      FOOTER_HEIGHT = 80
+      MARGIN = 40
+      SIDEBAR_WIDTH = 280
 
       ROM_EXTENSIONS = ['.sms', '.gg', '.bin', '.rom'].freeze
 
@@ -20,12 +20,12 @@ module AstralVerse
         sidebar:      Gosu::Color.new(255, 18, 13, 35),
         highlight:    Gosu::Color.new(255, 70, 50, 120),
         highlight_file: Gosu::Color.new(255, 50, 80, 50),
-        text:         Gosu::Color.new(255, 230, 220, 255),
-        dim_text:     Gosu::Color.new(255, 140, 130, 170),
-        accent:       Gosu::Color.new(255, 180, 140, 255),
-        folder:       Gosu::Color.new(255, 255, 200, 100),
-        file_rom:     Gosu::Color.new(255, 150, 255, 150),
-        file_other:   Gosu::Color.new(255, 180, 180, 200),
+        text:         Gosu::Color.new(255, 255, 255, 255),      # Pure white - max contrast
+        dim_text:     Gosu::Color.new(255, 200, 200, 220),      # Light gray
+        accent:       Gosu::Color.new(255, 220, 180, 255),     # Bright purple-white
+        folder:       Gosu::Color.new(255, 255, 220, 120),      # Bright yellow
+        file_rom:     Gosu::Color.new(255, 120, 255, 120),      # Bright green
+        file_other:   Gosu::Color.new(255, 220, 220, 240),     # Light gray-white
         footer:       Gosu::Color.new(255, 25, 18, 45),
         border:       Gosu::Color.new(255, 90, 70, 140),
       }
@@ -54,11 +54,11 @@ module AstralVerse
         @key_repeat_delay = 30   # ms before repeat starts
         @key_repeat_interval = 15 # ms between repeats when held
 
-        @font_title = Gosu::Font.new(42, name: "Courier New")
-        @font_path   = Gosu::Font.new(20, name: "Courier New")
-        @font_item   = Gosu::Font.new(24, name: "Courier New")
-        @font_small  = Gosu::Font.new(16, name: "Courier New")
-        @font_button = Gosu::Font.new(18, name: "Courier New")
+        @font_title = Gosu::Font.new(56, name: "Courier New")
+        @font_path   = Gosu::Font.new(28, name: "Courier New")
+        @font_item   = Gosu::Font.new(32, name: "Courier New")
+        @font_small  = Gosu::Font.new(22, name: "Courier New")
+        @font_button = Gosu::Font.new(24, name: "Courier New")
         @bg_anim = 0.0
 
         @bookmarks = {
@@ -177,14 +177,14 @@ module AstralVerse
         Gosu.draw_rect(0, 0, SIDEBAR_WIDTH, HEIGHT, COLORS[:sidebar])
 
         title = "► Quick Paths"
-        @font_small.draw_text(title, 20, 20, 1, 1, 1, COLORS[:accent])
-        Gosu.draw_rect(15, 48, SIDEBAR_WIDTH - 30, 2, COLORS[:border])
+        @font_small.draw_text(title, 20, 25, 1, 1, 1, COLORS[:accent])
+        Gosu.draw_rect(15, 56, SIDEBAR_WIDTH - 30, 2, COLORS[:border])
 
-        y = 65
+        y = 80
         @bookmarks.each_with_index do |(label, path), i|
           color = (i == @bookmark_selected) ? COLORS[:highlight] : COLORS[:dim_text]
           @font_small.draw_text("📁 #{label}", 20, y, 1, 1, 1, color)
-          y += 30
+          y += 36
         end
 
         Gosu.draw_rect(SIDEBAR_WIDTH, 0, 2, HEIGHT, COLORS[:border])
@@ -277,13 +277,16 @@ module AstralVerse
           ratio = @visible_count.to_f / @entries.length
           bar_h = ratio * list_height
           bar_y = list_top + (@scroll.to_f / @entries.length) * list_height
+          @scrollbar_track = { x: list_left + list_width + 5, y: list_top, w: 16, h: list_height }
+          @scrollbar_thumb = { x: list_left + list_width + 5, y: bar_y, w: 16, h: [bar_h, 30].max }
           # Draw track
-          Gosu.draw_rect(list_left + list_width + 5, list_top.to_i, 6, list_height, COLORS[:bg])
-          # Draw thumb (wider if dragging)
-          thumb_w = @scroll_dragging ? 10 : 6
-          thumb_x = list_left + list_width + 5 - (thumb_w - 6) / 2
+          Gosu.draw_rect(@scrollbar_track[:x], @scrollbar_track[:y], @scrollbar_track[:w], @scrollbar_track[:h], Gosu::Color.new(255, 30, 20, 50))
+          # Draw thumb
           thumb_color = @scroll_dragging ? COLORS[:accent] : COLORS[:border]
-          Gosu.draw_rect(thumb_x, bar_y.to_i, thumb_w, [bar_h, 20].max.to_i, thumb_color)
+          Gosu.draw_rect(@scrollbar_thumb[:x], @scrollbar_thumb[:y].to_i, @scrollbar_thumb[:w], @scrollbar_thumb[:h].to_i, thumb_color)
+        else
+          @scrollbar_track = nil
+          @scrollbar_thumb = nil
         end
       end
 
@@ -356,6 +359,10 @@ module AstralVerse
           adjust_scroll
         when Gosu::KB_H
           toggle_hidden
+        when Gosu::MsWheelUp
+          move_selection(-3)
+        when Gosu::MsWheelDown
+          move_selection(3)
         end
       end
 
@@ -374,24 +381,8 @@ module AstralVerse
         end
       end
 
-      def wheel_up
-        move_selection(-3)
-      end
-
-      def wheel_down
-        move_selection(3)
-      end
-
-      # Scrollbar hit testing
-      def hit_scrollbar?(mx, my)
-        return false if @entries.length <= @visible_count
-        list_top = HEADER_HEIGHT + 10
-        list_height = HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT - 20
-        list_left = SIDEBAR_WIDTH + 20
-        list_width = WIDTH - SIDEBAR_WIDTH - 40
-        track_x = list_left + list_width + 5
-        track_w = 6
-        mx >= track_x && mx <= track_x + track_w && my >= list_top && my <= list_top + list_height
+      def needs_cursor?
+        true
       end
 
       def update_scroll_from_drag(y)
@@ -409,9 +400,9 @@ module AstralVerse
       end
 
       def handle_mouse_click(mx, my, click_type)
-        # Sidebar bookmarks
-        if mx < SIDEBAR_WIDTH && my > 50
-          idx = ((my - 50) / 24.0).floor
+        # Sidebar bookmarks - use actual draw positions
+        if mx < SIDEBAR_WIDTH && my > 80
+          idx = ((my - 80) / 36.0).floor
           if idx >= 0 && idx < @bookmarks.length
             nav_path = @bookmarks.values.to_a[idx]
             navigate_to(nav_path)
@@ -424,12 +415,13 @@ module AstralVerse
         list_left = SIDEBAR_WIDTH + 20
         list_width = WIDTH - SIDEBAR_WIDTH - 40
         list_height = HEIGHT - HEADER_HEIGHT - FOOTER_HEIGHT - 20
+        row_start_y = list_top + 40  # After column headers
 
         return unless mx >= list_left && mx <= list_left + list_width
-        return unless my >= list_top + 28 && my <= list_top + list_height
+        return unless my >= row_start_y && my <= row_start_y + list_height - 40
 
         # Calculate which row was clicked
-        row = ((my - (list_top + 28)) / LINE_HEIGHT).floor + @scroll
+        row = ((my - row_start_y) / LINE_HEIGHT).floor + @scroll
 
         if row >= 0 && row < @entries.length
           @selected = row
