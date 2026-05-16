@@ -12,8 +12,10 @@
 
 #define SAMPLE_RATE 44100
 #define CHANNELS 1
-#define RING_SAMPLES (SAMPLE_RATE * 4)
-#define PREBUFFER_SAMPLES (SAMPLE_RATE / 20)
+#define RING_SAMPLES (SAMPLE_RATE * 8)
+#define TARGET_LOW_SAMPLES (SAMPLE_RATE * 50 / 1000)
+#define TARGET_SAMPLES (SAMPLE_RATE * 80 / 1000)
+#define TARGET_HIGH_SAMPLES (SAMPLE_RATE * 120 / 1000)
 
 struct sink_state {
   struct pw_thread_loop *loop;
@@ -25,6 +27,8 @@ struct sink_state {
   size_t read_pos;
   size_t write_pos;
   size_t queued;
+  uint64_t underruns;
+  uint64_t overruns;
   int prebuffering;
   int running;
 };
@@ -35,6 +39,7 @@ static void ring_write(struct sink_state *state, const int16_t *samples, size_t 
     if (state->queued == RING_SAMPLES) {
       state->read_pos = (state->read_pos + 1) % RING_SAMPLES;
       state->queued--;
+      state->overruns++;
     }
     state->ring[state->write_pos] = samples[i];
     state->write_pos = (state->write_pos + 1) % RING_SAMPLES;
@@ -47,7 +52,7 @@ static size_t ring_read(struct sink_state *state, int16_t *samples, size_t count
   size_t copied = 0;
   pthread_mutex_lock(&state->lock);
 
-  if (state->prebuffering && state->queued < PREBUFFER_SAMPLES) {
+  if (state->prebuffering && state->queued < TARGET_HIGH_SAMPLES) {
     pthread_mutex_unlock(&state->lock);
     return 0;
   }
@@ -59,7 +64,7 @@ static size_t ring_read(struct sink_state *state, int16_t *samples, size_t count
     state->queued--;
   }
   if (copied < count) {
-    state->prebuffering = 1;
+    state->underruns++;
   }
 
   pthread_mutex_unlock(&state->lock);
@@ -68,7 +73,7 @@ static size_t ring_read(struct sink_state *state, int16_t *samples, size_t count
 
 static void *input_loop(void *userdata) {
   struct sink_state *state = userdata;
-  int16_t buffer[2048];
+  int16_t buffer[8192];
 
   while (state->running) {
     ssize_t bytes = read(STDIN_FILENO, buffer, sizeof(buffer));

@@ -8,6 +8,7 @@ module AstralVerse
     DRAW_HEIGHT = VisionSprite::POOL_HEIGHT * MAGNIFY
     TOOLBAR_HEIGHT = 36
     STATUS_BAR = 28
+    MAX_CATCHUP_FRAMES = 4
     WIDTH = DRAW_WIDTH
     HEIGHT = DRAW_HEIGHT + TOOLBAR_HEIGHT + STATUS_BAR
 
@@ -61,12 +62,17 @@ module AstralVerse
 
       if delta >= @vision_interval && @running
         if @stone.instance_variable_get(:@codex_present)
-          sync_game_input_state
-          @stone.gaze_frame
-          @audio_player&.update
-          @frame_count += 1
-          refresh_frame_image
-          @last_vision = now
+          frames_advanced = 0
+          while now - @last_vision >= @vision_interval && frames_advanced < MAX_CATCHUP_FRAMES
+            sync_game_input_state
+            @stone.gaze_frame
+            @audio_player&.update
+            @frame_count += 1
+            @last_vision += @vision_interval
+            frames_advanced += 1
+          end
+          @last_vision = now if frames_advanced == MAX_CATCHUP_FRAMES && now - @last_vision >= @vision_interval
+          refresh_frame_image if frames_advanced.positive?
         else
           # No ROM loaded, auto-stop
           @running = false

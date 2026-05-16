@@ -165,7 +165,6 @@ module AstralVerse
 
         data = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }.pack('s<*')
         @io.write(data)
-        @io.flush
       end
 
       def close
