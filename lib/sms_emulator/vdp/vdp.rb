@@ -225,11 +225,12 @@ module SmsEmulator
         y = @vram[attr_addr] || 0
         break if y == 0xD0
 
-        sprite_bottom = (y + sprite_height * zoom) & 0xFF
-        overlaps = if y < sprite_bottom
-                     scanline >= y && scanline < sprite_bottom
+        sprite_y = (y + 1) & 0xFF
+        sprite_bottom = (sprite_y + sprite_height * zoom) & 0xFF
+        overlaps = if sprite_y < sprite_bottom
+                     scanline >= sprite_y && scanline < sprite_bottom
                    else
-                     scanline >= y || scanline < sprite_bottom
+                     scanline >= sprite_y || scanline < sprite_bottom
                    end
         next unless overlaps
 
@@ -241,7 +242,7 @@ module SmsEmulator
         x = @vram[entry_addr] || 0
         tile = @vram[(entry_addr + 1) & 0x3FFF] || 0
         x -= 8 if (@registers[0] & 0x08) != 0
-        row = ((scanline - y) & 0xFF) / zoom
+        row = ((scanline - sprite_y) & 0xFF) / zoom
         tile &= 0xFE if sprite_16px?
         tile += 1 if row >= 8
         row &= 7

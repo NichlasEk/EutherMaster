@@ -230,9 +230,28 @@ RSpec.describe SmsEmulator::VDP do
     vdp.vram[sprite_base + 0x81] = 1
     vdp.vram[32] = 0x80
 
-    vdp.render_scanline(10)
+    vdp.render_scanline(11)
 
-    expect(vdp.framebuffer[10 * described_class::SMS_WIDTH + 20]).to eq(0x15)
+    expect(vdp.framebuffer[11 * described_class::SMS_WIDTH + 20]).to eq(0x15)
+  end
+
+  it 'draws SMS sprites one scanline below their stored Y coordinate' do
+    vdp = described_class.new
+    vdp.registers[1] = 0x40
+    vdp.registers[5] = 0x7E
+    vdp.cram[17] = 0x15
+    sprite_base = 0x3F00
+
+    vdp.vram[sprite_base] = 0
+    vdp.vram[sprite_base + 0x80] = 20
+    vdp.vram[sprite_base + 0x81] = 1
+    vdp.vram[32] = 0x80
+
+    vdp.render_scanline(0)
+    expect(vdp.framebuffer[20]).not_to eq(0x15)
+
+    vdp.render_scanline(1)
+    expect(vdp.framebuffer[described_class::SMS_WIDTH + 20]).to eq(0x15)
   end
 
   it 'sets sprite collision and overflow status bits' do
@@ -267,9 +286,9 @@ RSpec.describe SmsEmulator::VDP do
     vdp.vram[sprite_base + 0x83] = 1
     vdp.vram[32] = 0x80
 
-    vdp.render_scanline(10)
+    vdp.render_scanline(11)
 
-    expect(vdp.framebuffer[10 * described_class::SMS_WIDTH + 20]).to eq(0x15)
+    expect(vdp.framebuffer[11 * described_class::SMS_WIDTH + 20]).to eq(0x15)
   end
 
   it 'uses backdrop color when display is disabled' do
