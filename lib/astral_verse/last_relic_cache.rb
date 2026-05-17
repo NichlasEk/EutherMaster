@@ -14,7 +14,8 @@ module AstralVerse
         debug_mask: false,
         autostart: true
       },
-      key_bindings: {}
+      key_bindings: {},
+      controller_bindings: {}
     }.freeze
 
     def self.last_relic
@@ -88,6 +89,18 @@ module AstralVerse
       update_config(key_bindings: bindings.transform_keys(&:to_sym))
     rescue => e
       puts "⚠️ Could not save key bindings: #{e.message}"
+    end
+
+    def self.controller_bindings
+      config[:controller_bindings] || {}
+    rescue
+      {}
+    end
+
+    def self.save_controller_bindings(bindings)
+      update_config(controller_bindings: bindings.transform_keys(&:to_sym))
+    rescue => e
+      puts "⚠️ Could not save controller bindings: #{e.message}"
     end
 
     def self.last_dir

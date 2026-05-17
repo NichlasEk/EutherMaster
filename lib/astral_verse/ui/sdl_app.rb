@@ -35,14 +35,14 @@ module AstralVerse
       ].freeze
       VOLUME_SLIDER = { x: 614, y: 4, w: 146, h: TOOLBAR_H - 8 }.freeze
       INPUT_ACTIONS = [
-        { id: :up, label: 'Up', gesture: MysticTouch::GESTURE_NORTH, default: SDL3::K_UP },
-        { id: :down, label: 'Down', gesture: MysticTouch::GESTURE_SOUTH, default: SDL3::K_DOWN },
-        { id: :left, label: 'Left', gesture: MysticTouch::GESTURE_WEST, default: SDL3::K_LEFT },
-        { id: :right, label: 'Right', gesture: MysticTouch::GESTURE_EAST, default: SDL3::K_RIGHT },
-        { id: :button_1, label: 'Button 1', gesture: MysticTouch::GESTURE_PRIMUS, default: SDL3::K_Z },
-        { id: :button_2, label: 'Button 2', gesture: MysticTouch::GESTURE_SECUNDUS, default: SDL3::K_X },
-        { id: :pause, label: 'Pause', special: :pause, default: SDL3::K_P },
-        { id: :reset, label: 'Reset', special: :reset, default: SDL3::K_R }
+        { id: :up, label: 'Up', gesture: MysticTouch::GESTURE_NORTH, default: SDL3::K_UP, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_UP },
+        { id: :down, label: 'Down', gesture: MysticTouch::GESTURE_SOUTH, default: SDL3::K_DOWN, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_DOWN },
+        { id: :left, label: 'Left', gesture: MysticTouch::GESTURE_WEST, default: SDL3::K_LEFT, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_LEFT },
+        { id: :right, label: 'Right', gesture: MysticTouch::GESTURE_EAST, default: SDL3::K_RIGHT, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_RIGHT },
+        { id: :button_1, label: 'Button 1', gesture: MysticTouch::GESTURE_PRIMUS, default: SDL3::K_Z, pad_default: SDL3::GAMEPAD_BUTTON_SOUTH },
+        { id: :button_2, label: 'Button 2', gesture: MysticTouch::GESTURE_SECUNDUS, default: SDL3::K_X, pad_default: SDL3::GAMEPAD_BUTTON_EAST },
+        { id: :pause, label: 'Pause', special: :pause, default: SDL3::K_P, pad_default: SDL3::GAMEPAD_BUTTON_START },
+        { id: :reset, label: 'Reset', special: :reset, default: SDL3::K_R, pad_default: SDL3::GAMEPAD_BUTTON_BACK }
       ].freeze
       INPUT_ACTION_BY_ID = INPUT_ACTIONS.each_with_object({}) { |action, map| map[action[:id]] = action }.freeze
 
@@ -72,7 +72,11 @@ module AstralVerse
         @input_dirty = true
         @input_port_a = 0xFF
         @key_bindings = load_key_bindings
+        @controller_bindings = load_controller_bindings
         rebuild_key_lookup
+        rebuild_controller_lookup
+        @pad_buttons = {}
+        @gamepads = {}
         @keybindings_open = false
         @binding_capture = nil
         @frame_count = 0
@@ -104,6 +108,7 @@ module AstralVerse
         init_sdl
         @audio_player = build_audio_player
         open_window
+        open_existing_gamepads
         autostart_loaded_relic
         loop_once while !@closing
       ensure
@@ -117,7 +122,7 @@ module AstralVerse
       private
 
       def init_sdl
-        SDL3.check(SDL3.init(SDL3::INIT_VIDEO | SDL3::INIT_AUDIO | SDL3::INIT_EVENTS), 'SDL_Init')
+        SDL3.check(SDL3.init(SDL3::INIT_VIDEO | SDL3::INIT_AUDIO | SDL3::INIT_EVENTS | SDL3::INIT_GAMEPAD), 'SDL_Init')
         @sdl_ready = true
         SDL3.check(SDL3TTF.init, 'TTF_Init')
         @ttf_ready = true
@@ -150,6 +155,7 @@ module AstralVerse
       end
 
       def close_window
+        close_gamepads
         @text_cache&.each_value { |texture| SDL3.destroy_texture(texture[:ptr]) }
         @fonts&.each_value { |font| SDL3TTF.close_font(font) }
         SDL3.destroy_texture(@screen_texture) if @screen_texture && !@screen_texture.null?
@@ -190,12 +196,20 @@ module AstralVerse
             handle_mouse_motion(@event.get_float32(28), @event.get_float32(32))
           when SDL3::EVENT_MOUSE_WHEEL
             handle_wheel(@event.get_float32(28))
+          when SDL3::EVENT_GAMEPAD_BUTTON_DOWN
+            handle_gamepad_button(@event.get_uint8(20), true)
+          when SDL3::EVENT_GAMEPAD_BUTTON_UP
+            handle_gamepad_button(@event.get_uint8(20), false)
+          when SDL3::EVENT_GAMEPAD_ADDED
+            open_gamepad(@event.get_uint32(16))
+          when SDL3::EVENT_GAMEPAD_REMOVED
+            close_gamepad(@event.get_uint32(16))
           end
         end
       end
 
       def handle_key(key, down, repeat)
-        if @binding_capture
+        if @binding_capture&.[](:type) == :keyboard
           capture_binding_key(key) if down && !repeat
           return
         end
@@ -215,6 +229,7 @@ module AstralVerse
               @mode = :game
             elsif @keybindings_open
               @keybindings_open = false
+              @binding_capture = nil
             elsif @fullscreen
               toggle_fullscreen
             else
@@ -225,6 +240,26 @@ module AstralVerse
         end
 
         @mode == :browser ? handle_browser_key(key, down) : handle_game_key(key, down)
+      end
+
+      def handle_gamepad_button(button, down)
+        if @binding_capture&.[](:type) == :controller
+          capture_controller_button(button) if down
+          return
+        end
+
+        previous = @pad_buttons[button]
+        @pad_buttons[button] = down
+        action_id = @controller_to_action[button]
+        @input_dirty = true if previous != down && action_id
+        return unless down
+
+        case INPUT_ACTION_BY_ID[action_id]&.[](:special)
+        when :pause
+          @stone.emulator.request_pause
+        when :reset
+          reset_game
+        end
       end
 
       def handle_game_key(key, down)
@@ -421,7 +456,7 @@ module AstralVerse
       end
 
       def draw_keybindings_menu
-        panel_w = [360, window_width - 32].min
+        panel_w = [520, window_width - 32].min
         row_h = 30
         panel_h = 54 + INPUT_ACTIONS.length * row_h
         x = [[window_width - panel_w - 12, 12].max, window_width - panel_w].min
@@ -433,17 +468,25 @@ module AstralVerse
         fill_rect(x + panel_w - 1, y, 1, panel_h, COLORS[:border])
         text('Key Bindings', x + 14, y + 12, 16, COLORS[:text])
         text('ESC closes', x + panel_w - 92, y + 14, 12, COLORS[:dim])
+        keyboard_x = x + panel_w - 248
+        controller_x = x + panel_w - 126
+        text('Keyboard', keyboard_x, y + 34, 11, COLORS[:dim])
+        text('Pad', controller_x, y + 34, 11, COLORS[:dim])
 
         INPUT_ACTIONS.each_with_index do |action, index|
-          row_y = y + 44 + index * row_h
+          row_y = y + 52 + index * row_h
           hover = @last_mouse[0] >= x + 8 && @last_mouse[0] <= x + panel_w - 8 &&
             @last_mouse[1] >= row_y && @last_mouse[1] <= row_y + row_h - 3
-          active = @binding_capture == action[:id]
-          fill_rect(x + 8, row_y, panel_w - 16, row_h - 3, active ? COLORS[:hover] : (hover ? [42, 32, 70, 255] : COLORS[:panel]))
+          active_keyboard = @binding_capture == { type: :keyboard, action: action[:id] }
+          active_controller = @binding_capture == { type: :controller, action: action[:id] }
+          fill_rect(x + 8, row_y, panel_w - 16, row_h - 3, hover ? [42, 32, 70, 255] : COLORS[:panel])
           text(action[:label], x + 18, row_y + 7, 13, COLORS[:text])
-          value = active ? 'press key...' : key_name(@key_bindings[action[:id]])
-          color = active ? COLORS[:good] : COLORS[:dim]
-          text(value, x + panel_w - text_size(value, 13)[0] - 18, row_y + 7, 13, color)
+          key_value = active_keyboard ? 'press...' : key_name(@key_bindings[action[:id]])
+          pad_value = active_controller ? 'press...' : controller_button_name(@controller_bindings[action[:id]])
+          fill_rect(keyboard_x - 6, row_y + 4, 104, row_h - 11, active_keyboard ? COLORS[:hover] : COLORS[:button])
+          fill_rect(controller_x - 6, row_y + 4, 104, row_h - 11, active_controller ? COLORS[:hover] : COLORS[:button])
+          text(key_value, keyboard_x, row_y + 7, 12, active_keyboard ? COLORS[:good] : COLORS[:text])
+          text(pad_value, controller_x, row_y + 7, 12, active_controller ? COLORS[:good] : COLORS[:text])
         end
       end
 
@@ -647,12 +690,13 @@ module AstralVerse
         return unless @input_dirty
 
         keys = @keys
+        pad_buttons = @pad_buttons
         port = 0xFF
         INPUT_ACTIONS.each do |action|
           gesture = action[:gesture]
           next unless gesture
 
-          port &= ~gesture if keys[@key_bindings[action[:id]]]
+          port &= ~gesture if keys[@key_bindings[action[:id]]] || pad_buttons[@controller_bindings[action[:id]]]
         end
 
         @input_port_a = port
@@ -666,14 +710,28 @@ module AstralVerse
         saved = LastRelicCache.key_bindings
         INPUT_ACTIONS.each_with_object({}) do |action, bindings|
           raw = saved[action[:id]]
-          key = raw.to_i
+          key = raw.nil? ? action[:default] : raw.to_i
           bindings[action[:id]] = key.positive? ? key : action[:default]
         end
       end
 
       def rebuild_key_lookup
         @key_to_action = {}
-        @key_bindings.each { |action, key| @key_to_action[key] = action }
+        @key_bindings.each { |action, key| @key_to_action[key] = action if key && key.positive? }
+      end
+
+      def load_controller_bindings
+        saved = LastRelicCache.controller_bindings
+        INPUT_ACTIONS.each_with_object({}) do |action, bindings|
+          raw = saved[action[:id]]
+          button = raw.nil? ? action[:pad_default] : raw.to_i
+          bindings[action[:id]] = button >= 0 ? button : action[:pad_default]
+        end
+      end
+
+      def rebuild_controller_lookup
+        @controller_to_action = {}
+        @controller_bindings.each { |action, button| @controller_to_action[button] = action if button && button >= 0 }
       end
 
       def capture_binding_key(key)
@@ -685,7 +743,7 @@ module AstralVerse
         @key_bindings.each_key do |action|
           @key_bindings[action] = 0 if @key_bindings[action] == key
         end
-        @key_bindings[@binding_capture] = key
+        @key_bindings[@binding_capture[:action]] = key
         @keys.clear
         @input_dirty = true
         @binding_capture = nil
@@ -693,8 +751,20 @@ module AstralVerse
         LastRelicCache.save_key_bindings(@key_bindings)
       end
 
+      def capture_controller_button(button)
+        @controller_bindings.each_key do |action|
+          @controller_bindings[action] = -1 if @controller_bindings[action] == button
+        end
+        @controller_bindings[@binding_capture[:action]] = button
+        @pad_buttons.clear
+        @input_dirty = true
+        @binding_capture = nil
+        rebuild_controller_lookup
+        LastRelicCache.save_controller_bindings(@controller_bindings)
+      end
+
       def click_keybindings(x, y)
-        panel_w = [360, window_width - 32].min
+        panel_w = [520, window_width - 32].min
         row_h = 30
         panel_h = 54 + INPUT_ACTIONS.length * row_h
         panel_x = [[window_width - panel_w - 12, 12].max, window_width - panel_w].min
@@ -705,18 +775,53 @@ module AstralVerse
           return
         end
 
-        row = ((y - panel_y - 44) / row_h).floor
+        row = ((y - panel_y - 52) / row_h).floor
         return unless row >= 0 && row < INPUT_ACTIONS.length
 
-        @binding_capture = INPUT_ACTIONS[row][:id]
+        keyboard_x = panel_x + panel_w - 248
+        controller_x = panel_x + panel_w - 126
+        action = INPUT_ACTIONS[row][:id]
+        if x >= keyboard_x - 6 && x <= keyboard_x + 98
+          @binding_capture = { type: :keyboard, action: action }
+        elsif x >= controller_x - 6 && x <= controller_x + 98
+          @binding_capture = { type: :controller, action: action }
+        end
       end
 
       def reset_game
         @keys.clear
+        @pad_buttons.clear
         @input_dirty = true
         @stone.attune
         @audio_player&.stop
         @frame_count = 0
+      end
+
+      def open_existing_gamepads
+        count_ptr = FFI::MemoryPointer.new(:int)
+        ids = SDL3.get_gamepads(count_ptr)
+        count = count_ptr.read_int
+        count.times { |index| open_gamepad(ids.get_uint32(index * 4)) } if ids && !ids.null?
+        SDL3.free(ids) if ids && !ids.null?
+      end
+
+      def open_gamepad(instance_id)
+        return if @gamepads[instance_id]
+
+        gamepad = SDL3.open_gamepad(instance_id)
+        @gamepads[instance_id] = gamepad if gamepad && !gamepad.null?
+      end
+
+      def close_gamepad(instance_id)
+        gamepad = @gamepads.delete(instance_id)
+        SDL3.close_gamepad(gamepad) if gamepad && !gamepad.null?
+        @pad_buttons.clear
+        @input_dirty = true
+      end
+
+      def close_gamepads
+        @gamepads.each_value { |gamepad| SDL3.close_gamepad(gamepad) if gamepad && !gamepad.null? }
+        @gamepads.clear
       end
 
       def toggle_fullscreen
@@ -854,6 +959,26 @@ module AstralVerse
         when SDL3::K_F11 then 'F11'
         else
           key.between?(32, 126) ? key.chr.upcase : "0x#{key.to_s(16).upcase}"
+        end
+      end
+
+      def controller_button_name(button)
+        return '-' if button.nil? || button.to_i < 0
+
+        case button
+        when SDL3::GAMEPAD_BUTTON_SOUTH then 'South'
+        when SDL3::GAMEPAD_BUTTON_EAST then 'East'
+        when SDL3::GAMEPAD_BUTTON_WEST then 'West'
+        when SDL3::GAMEPAD_BUTTON_NORTH then 'North'
+        when SDL3::GAMEPAD_BUTTON_BACK then 'Back'
+        when SDL3::GAMEPAD_BUTTON_START then 'Start'
+        when SDL3::GAMEPAD_BUTTON_LEFT_SHOULDER then 'L'
+        when SDL3::GAMEPAD_BUTTON_RIGHT_SHOULDER then 'R'
+        when SDL3::GAMEPAD_BUTTON_DPAD_UP then 'D-Up'
+        when SDL3::GAMEPAD_BUTTON_DPAD_DOWN then 'D-Down'
+        when SDL3::GAMEPAD_BUTTON_DPAD_LEFT then 'D-Left'
+        when SDL3::GAMEPAD_BUTTON_DPAD_RIGHT then 'D-Right'
+        else "B#{button}"
         end
       end
 

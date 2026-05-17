@@ -8,6 +8,7 @@ module AstralVerse
     INIT_VIDEO = 0x00000020
     INIT_AUDIO = 0x00000010
     INIT_EVENTS = 0x00004000
+    INIT_GAMEPAD = 0x00002000
 
     WINDOW_FULLSCREEN = 0x0000000000000001
     WINDOW_RESIZABLE = 0x0000000000000020
@@ -27,8 +28,24 @@ module AstralVerse
     EVENT_MOUSE_BUTTON_DOWN = 0x401
     EVENT_MOUSE_BUTTON_UP = 0x402
     EVENT_MOUSE_WHEEL = 0x403
+    EVENT_GAMEPAD_BUTTON_DOWN = 0x651
+    EVENT_GAMEPAD_BUTTON_UP = 0x652
+    EVENT_GAMEPAD_ADDED = 0x653
+    EVENT_GAMEPAD_REMOVED = 0x654
 
     BUTTON_LEFT = 1
+    GAMEPAD_BUTTON_SOUTH = 0
+    GAMEPAD_BUTTON_EAST = 1
+    GAMEPAD_BUTTON_WEST = 2
+    GAMEPAD_BUTTON_NORTH = 3
+    GAMEPAD_BUTTON_BACK = 4
+    GAMEPAD_BUTTON_START = 6
+    GAMEPAD_BUTTON_LEFT_SHOULDER = 9
+    GAMEPAD_BUTTON_RIGHT_SHOULDER = 10
+    GAMEPAD_BUTTON_DPAD_UP = 11
+    GAMEPAD_BUTTON_DPAD_DOWN = 12
+    GAMEPAD_BUTTON_DPAD_LEFT = 13
+    GAMEPAD_BUTTON_DPAD_RIGHT = 14
 
     K_RETURN = 0x0000000d
     K_ESCAPE = 0x0000001b
@@ -109,6 +126,10 @@ module AstralVerse
     attach_function :poll_event, :SDL_PollEvent, [:pointer], :bool
     attach_function :hide_cursor, :SDL_HideCursor, [], :bool
     attach_function :show_cursor, :SDL_ShowCursor, [], :bool
+    attach_function :get_gamepads, :SDL_GetGamepads, [:pointer], :pointer
+    attach_function :open_gamepad, :SDL_OpenGamepad, [:uint32], :pointer
+    attach_function :close_gamepad, :SDL_CloseGamepad, [:pointer], :void
+    attach_function :free, :SDL_free, [:pointer], :void
 
     attach_function :open_audio_device_stream, :SDL_OpenAudioDeviceStream, [:uint32, AudioSpec.by_ref, :pointer, :pointer], :pointer
     attach_function :resume_audio_stream_device, :SDL_ResumeAudioStreamDevice, [:pointer], :bool
