@@ -19,6 +19,7 @@ module SmsEmulator
       @mapper = [0, 0, 1, 2]
       @bank_count = 1
       @bank_offsets = [0, 0, 0x4000, 0x8000]
+      @cpu_memory = nil
     end
 
     attr_accessor :vdp, :controller, :psg, :io_cycle
@@ -36,6 +37,7 @@ module SmsEmulator
       @rom.fill(0)
       size = [@cartridge.length, ROM_SIZE].min
       @rom[0, size] = @cartridge[0, size]
+      rebuild_cpu_memory! if direct_cpu_memory_enabled?
     end
 
     def load_rom_file(path)
@@ -74,8 +76,16 @@ module SmsEmulator
         write_cartridge(addr, value)
       elsif addr < 0xE000
         @ram[addr - 0xC000] = value
+        if @cpu_memory
+          @cpu_memory[addr] = value
+          @cpu_memory[addr + 0x2000] = value
+        end
       else
         @ram[addr - 0xE000] = value
+        if @cpu_memory
+          @cpu_memory[addr] = value
+          @cpu_memory[addr - 0x2000] = value
+        end
       end
     end
 
@@ -86,6 +96,13 @@ module SmsEmulator
 
     def fast_cpu_bus?
       true
+    end
+
+    def direct_cpu_memory
+      return nil unless direct_cpu_memory_enabled?
+
+      rebuild_cpu_memory! unless @cpu_memory
+      @cpu_memory
     end
 
     def read_io(port)
@@ -163,12 +180,14 @@ module SmsEmulator
       when :korean_6000_ram
         if addr >= 0x6000 && addr <= 0x7FFF
           @cart_ram[(addr - 0x6000) & 0x1FFF] = value
+          @cpu_memory[addr] = value if @cpu_memory
         else
           write_korean_6000_ram_mapper(addr, value, wide: false)
         end
       when :korean_6000_ram_wide
         if addr >= 0x6000 && addr <= 0x7FFF
           @cart_ram[(addr - 0x6000) & 0x1FFF] = value
+          @cpu_memory[addr] = value if @cpu_memory
         else
           write_korean_6000_ram_mapper(addr, value, wide: true)
         end
@@ -185,6 +204,7 @@ module SmsEmulator
         @codemasters_ram_enabled = (value & 0x80) != 0
       elsif @codemasters_ram_enabled && addr >= 0xA000 && addr <= 0xBFFF
         @cart_ram[addr & 0x1FFF] = value
+        @cpu_memory[addr] = value if @cpu_memory
       elsif addr <= 0xBFFF
         set_bank(3, bank)
       end
@@ -223,11 +243,17 @@ module SmsEmulator
       end
       @bank_offsets[index] = (value % @bank_count) * 0x4000
       @ram[addr - 0xE000] = value
+      if @cpu_memory
+        @cpu_memory[addr] = value
+        @cpu_memory[addr - 0x2000] = value
+      end
+      refresh_cpu_rom_window(index) if index > 0
     end
 
     def set_bank(index, bank)
       @mapper[index] = bank
       @bank_offsets[index] = (bank % @bank_count) * 0x4000
+      refresh_cpu_rom_window(index)
     end
 
     def sync_mapper_ram
@@ -240,6 +266,33 @@ module SmsEmulator
       @mapper.each_with_index do |value, index|
         @bank_offsets[index] = (value % @bank_count) * 0x4000
       end
+    end
+
+    def rebuild_cpu_memory!
+      @cpu_memory = Array.new(0x10000, 0)
+      0.upto(0xBFFF) { |addr| @cpu_memory[addr] = read_rom(addr) }
+      0.upto(RAM_SIZE - 1) do |offset|
+        value = @ram[offset] || 0
+        @cpu_memory[0xC000 + offset] = value
+        @cpu_memory[0xE000 + offset] = value
+      end
+    end
+
+    def refresh_cpu_rom_window(index)
+      return unless @cpu_memory
+
+      case index
+      when 1
+        0.upto(0x3FFF) { |addr| @cpu_memory[addr] = read_rom(addr) }
+      when 2
+        0x4000.upto(0x7FFF) { |addr| @cpu_memory[addr] = read_rom(addr) }
+      when 3
+        0x8000.upto(0xBFFF) { |addr| @cpu_memory[addr] = read_rom(addr) }
+      end
+    end
+
+    def direct_cpu_memory_enabled?
+      ENV['ASTRAL_DIRECT_CPU_MEMORY'] == '1'
     end
 
     def codemasters_family?

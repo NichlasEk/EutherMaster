@@ -121,22 +121,20 @@ module SmsEmulator
     end
 
     def render_frame_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
-      renderer = self.class.new
-      renderer.restore_state(@frame_start_state || capture_state)
       writes = @frame_writes || []
       write_index = 0
       samples = Array.new(count, 0.0)
+      restore_render_state(@frame_start_state || capture_state)
 
       count.times do |sample_index|
         cycle = (sample_index * frame_cycles / count.to_f).floor
         while write_index < writes.length && writes[write_index][:cycle] <= cycle
-          renderer.apply_write(writes[write_index][:value])
+          apply_write(writes[write_index][:value])
           write_index += 1
         end
-        samples[sample_index] = renderer.render_sample(sample_rate)
+        samples[sample_index] = render_sample(sample_rate)
       end
 
-      restore_render_state(renderer.capture_state)
       samples
     end
 

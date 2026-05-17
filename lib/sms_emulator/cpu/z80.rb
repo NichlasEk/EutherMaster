@@ -119,9 +119,9 @@ module SmsEmulator
     def run_cycles(max_cycles)
       return 0 if max_cycles <= 0
 
+      return run_cycles_bus(max_cycles) if @memory.respond_to?(:fast_cpu_bus?)
       direct = @memory.respond_to?(:direct_cpu_memory) ? @memory.direct_cpu_memory : nil
       return run_cycles_direct(max_cycles, direct) if direct
-      return run_cycles_bus(max_cycles) if @memory.respond_to?(:fast_cpu_bus?)
 
       ran = 0
       steps = 0
@@ -179,6 +179,11 @@ module SmsEmulator
           @c = memory.read_byte(@pc) & 0xFF
           @pc = (@pc + 1) & 0xFFFF
           @cycles = 7
+        when 0x0F
+          old = @a
+          @a = ((old >> 1) | ((old & 1) << 7)) & 0xFF
+          @f = (@f & (FLAG_S | FLAG_Z | FLAG_P)) | (@a & FLAG_YX) | (old & FLAG_C)
+          @cycles = 4
         when 0x10
           @b = (@b - 1) & 0xFF
           disp = memory.read_byte(@pc) & 0xFF
@@ -189,6 +194,11 @@ module SmsEmulator
           else
             @cycles = 8
           end
+        when 0x11
+          @e = memory.read_byte(@pc) & 0xFF
+          @d = memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF
+          @pc = (@pc + 2) & 0xFFFF
+          @cycles = 10
         when 0x13
           value = (((@d << 8) | @e) + 1) & 0xFFFF
           @d = (value >> 8) & 0xFF
@@ -210,6 +220,17 @@ module SmsEmulator
           @pc = (@pc + 1) & 0xFFFF
           @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
           @cycles = 12
+        when 0x19
+          left = (@h << 8) | @l
+          right = (@d << 8) | @e
+          res = left + right
+          result = res & 0xFFFF
+          @h = result >> 8
+          @l = result & 0xFF
+          @f = (@f & (FLAG_S | FLAG_Z | FLAG_P)) | ((res >> 8) & FLAG_YX) |
+            ((((left & 0x0FFF) + (right & 0x0FFF)) & 0x1000) != 0 ? FLAG_H : 0) |
+            (res > 0xFFFF ? FLAG_C : 0)
+          @cycles = 11
         when 0x20
           disp = memory.read_byte(@pc) & 0xFF
           @pc = (@pc + 1) & 0xFFFF
@@ -242,6 +263,21 @@ module SmsEmulator
           else
             @cycles = 7
           end
+        when 0x29
+          left = (@h << 8) | @l
+          res = left + left
+          result = res & 0xFFFF
+          @h = result >> 8
+          @l = result & 0xFF
+          @f = (@f & (FLAG_S | FLAG_Z | FLAG_P)) | ((res >> 8) & FLAG_YX) |
+            ((((left & 0x0FFF) + (left & 0x0FFF)) & 0x1000) != 0 ? FLAG_H : 0) |
+            (res > 0xFFFF ? FLAG_C : 0)
+          @cycles = 11
+        when 0x2D
+          old = @l
+          @l = (old - 1) & 0xFF
+          @f = DEC8_FLAGS[old] | (@f & FLAG_C)
+          @cycles = 4
         when 0x2E
           @l = memory.read_byte(@pc) & 0xFF
           @pc = (@pc + 1) & 0xFFFF
@@ -272,6 +308,11 @@ module SmsEmulator
           addr = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
           @pc = (@pc + 2) & 0xFFFF
           @a = memory.read_byte(addr) & 0xFF
+          @cycles = 13
+        when 0x32
+          addr = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
+          @pc = (@pc + 2) & 0xFFFF
+          memory.write_byte(addr, @a)
           @cycles = 13
         when 0x3E
           @a = memory.read_byte(@pc) & 0xFF
@@ -319,11 +360,35 @@ module SmsEmulator
           memory.write_byte(@sp, @pc)
           @pc = addr
           @cycles = 17
+        when 0xC2
+          addr = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
+          @pc = (@pc + 2) & 0xFFFF
+          @pc = addr if (@f & FLAG_Z).zero?
+          @cycles = 10
+        when 0xC8
+          if (@f & FLAG_Z) != 0
+            lo = memory.read_byte(@sp) & 0xFF
+            @sp = (@sp + 1) & 0xFFFF
+            hi = memory.read_byte(@sp) & 0xFF
+            @sp = (@sp + 1) & 0xFFFF
+            @pc = (hi << 8) | lo
+            @cycles = 11
+          else
+            @cycles = 5
+          end
         when 0xD3
           port = ((@a << 8) | (memory.read_byte(@pc) & 0xFF)) & 0xFFFF
           @pc = (@pc + 1) & 0xFFFF
           write_io(port, @a)
           @cycles = 11
+        when 0xD9
+          @b, @b_alt = @b_alt, @b
+          @c, @c_alt = @c_alt, @c
+          @d, @d_alt = @d_alt, @d
+          @e, @e_alt = @e_alt, @e
+          @h, @h_alt = @h_alt, @h
+          @l, @l_alt = @l_alt, @l
+          @cycles = 4
         when 0xE6
           @a &= memory.read_byte(@pc) & 0xFF
           @pc = (@pc + 1) & 0xFFFF
@@ -343,6 +408,9 @@ module SmsEmulator
           @f = flags_sub(@a, value, res, 0)
           @f = (@f & ~FLAG_YX) | (value & FLAG_YX)
           @cycles = 7
+        when 0xFB
+          @ei_pending = true
+          @cycles = 4
         when 0xCB
           cb = memory.read_byte(@pc) & 0xFF
           @pc = (@pc + 1) & 0xFFFF
@@ -393,6 +461,52 @@ module SmsEmulator
             memory.write_byte(address, value)
             @f = szp(value) | (value & FLAG_YX) | (old >> 7)
             @cycles = 15
+          when 0x43 # BIT 0,E
+            @f = (@f & FLAG_C) | FLAG_H | (@e & FLAG_YX)
+            @f |= FLAG_Z | FLAG_P if (@e & 0x01) == 0
+            @cycles = 8
+          when 0x46 # BIT 0,(HL)
+            address = (@h << 8) | @l
+            value = memory.read_byte(address) & 0xFF
+            @f = (@f & FLAG_C) | FLAG_H | ((address >> 8) & FLAG_YX)
+            @f |= FLAG_Z | FLAG_P if (value & 0x01) == 0
+            @cycles = 15
+          when 0x67 # BIT 4,A
+            @f = (@f & FLAG_C) | FLAG_H | (@a & FLAG_YX)
+            @f |= FLAG_Z | FLAG_P if (@a & 0x10) == 0
+            @cycles = 8
+          when 0x6E # BIT 5,(HL)
+            address = (@h << 8) | @l
+            value = memory.read_byte(address) & 0xFF
+            @f = (@f & FLAG_C) | FLAG_H | ((address >> 8) & FLAG_YX)
+            @f |= FLAG_Z | FLAG_P if (value & 0x20) == 0
+            @cycles = 15
+          when 0x7A # BIT 7,D
+            @f = (@f & FLAG_C) | FLAG_H | (@d & FLAG_YX)
+            if (@d & 0x80) == 0
+              @f |= FLAG_Z | FLAG_P
+            else
+              @f |= FLAG_S
+            end
+            @cycles = 8
+          when 0x7E # BIT 7,(HL)
+            address = (@h << 8) | @l
+            value = memory.read_byte(address) & 0xFF
+            @f = (@f & FLAG_C) | FLAG_H | ((address >> 8) & FLAG_YX)
+            if (value & 0x80) == 0
+              @f |= FLAG_Z | FLAG_P
+            else
+              @f |= FLAG_S
+            end
+            @cycles = 15
+          when 0x7F # BIT 7,A
+            @f = (@f & FLAG_C) | FLAG_H | (@a & FLAG_YX)
+            if (@a & 0x80) == 0
+              @f |= FLAG_Z | FLAG_P
+            else
+              @f |= FLAG_S
+            end
+            @cycles = 8
           else
             execute_cb(cb, nil, nil)
           end
@@ -402,6 +516,44 @@ module SmsEmulator
           @r = ((@r + 1) & 0x7F) | (@r & 0x80)
           @ed_opcode_counts[ed] += 1 if @ed_opcode_counts
           case ed
+          when 0xA0
+            hl_value = (@h << 8) | @l
+            de_value = (@d << 8) | @e
+            bc_value = (@b << 8) | @c
+            value = memory.read_byte(hl_value) & 0xFF
+            memory.write_byte(de_value, value)
+            hl_value = (hl_value + 1) & 0xFFFF
+            de_value = (de_value + 1) & 0xFFFF
+            bc_value = (bc_value - 1) & 0xFFFF
+            @h = hl_value >> 8
+            @l = hl_value & 0xFF
+            @d = de_value >> 8
+            @e = de_value & 0xFF
+            @b = bc_value >> 8
+            @c = bc_value & 0xFF
+            n = (@a + value) & 0xFF
+            @f = (@f & (FLAG_S | FLAG_Z | FLAG_C)) | (bc_value != 0 ? FLAG_P : 0) | (n & FLAG_3) | ((n << 4) & FLAG_5)
+            @cycles = 16
+          when 0xA3
+            hl_value = (@h << 8) | @l
+            value = memory.read_byte(hl_value) & 0xFF
+            @b = (@b - 1) & 0xFF
+            memory.write_io((@b << 8) | @c, value)
+            hl_value = (hl_value + 1) & 0xFFFF
+            @h = hl_value >> 8
+            @l = hl_value & 0xFF
+            @f = (@b == 0 ? FLAG_Z : 0) | (@b & FLAG_S) | FLAG_N | (@b & FLAG_YX)
+            @cycles = 16
+          when 0xAB
+            hl_value = (@h << 8) | @l
+            value = memory.read_byte(hl_value) & 0xFF
+            @b = (@b - 1) & 0xFF
+            memory.write_io((@b << 8) | @c, value)
+            hl_value = (hl_value - 1) & 0xFFFF
+            @h = hl_value >> 8
+            @l = hl_value & 0xFF
+            @f = (@b == 0 ? FLAG_Z : 0) | (@b & FLAG_S) | FLAG_N | (@b & FLAG_YX)
+            @cycles = 16
           when 0xB0
             hl_value = (@h << 8) | @l
             de_value = (@d << 8) | @e
