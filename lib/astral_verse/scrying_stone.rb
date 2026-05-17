@@ -50,7 +50,7 @@ module AstralVerse
       if @emulator
         sync_controller
         @emulator.run_frame
-        @vision_sprite.scrying_pool.replace(@emulator.vdp.framebuffer)
+        @vision_sprite.bind_scrying_pool(@emulator.vdp.framebuffer)
         @vision_count += 1
         return
       end

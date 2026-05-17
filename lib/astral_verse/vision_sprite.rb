@@ -39,6 +39,10 @@ module AstralVerse
       @etch_pending = false
     end
 
+    def bind_scrying_pool(buffer)
+      @scrying_pool = buffer
+    end
+
     # GemHeart I/O veil $BE — astral data veil (channel/etch)
     def channel_ink
       @etch_pending = false

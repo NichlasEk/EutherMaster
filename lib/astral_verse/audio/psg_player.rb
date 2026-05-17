@@ -10,6 +10,7 @@ module AstralVerse
     NOISE_GAIN = 0.025
     STREAM_GAIN = 0.38
     AUDIO_OVERSUPPLY = ENV.fetch('ASTRAL_AUDIO_OVERSUPPLY', '1.0005').to_f
+    PIPE_PREBUFFER_CHUNKS = ENV.fetch('ASTRAL_AUDIO_PREBUFFER_CHUNKS', '4').to_i.clamp(0, 12)
 
     def initialize(psg)
       @psg = psg
@@ -22,6 +23,7 @@ module AstralVerse
       @dc_previous_input = 0.0
       @dc_previous_output = 0.0
       @sample_credit = 0.0
+      @pipe_prebuffered = false
     rescue StandardError => e
       warn "Audio disabled: #{e.message}"
       @disabled = true
@@ -31,7 +33,7 @@ module AstralVerse
       return if @disabled || !@psg
 
       return update_pipe if @sink
-      return update_chunked if @mode != 'loop'
+      return update_chunked if @mode == 'chunked'
 
       state = @psg.audible_state
       state[:tones].each_with_index do |tone, index|
@@ -52,19 +54,22 @@ module AstralVerse
     private
 
     def update_pipe
-      samples = dc_block(@psg.render_frame_samples(samples_for_frame, FRAME_CYCLES, SAMPLE_RATE))
+      count = samples_for_frame
+      prebuffer_pipe(count) unless @pipe_prebuffered
+      samples = dc_block!(@psg.render_frame_samples(count, FRAME_CYCLES, SAMPLE_RATE))
       @sink.write_samples(samples, STREAM_GAIN)
     rescue IOError, Errno::EPIPE
       @sink&.close
       @sink = nil
+      @mode = 'loop'
       @tone_sample ||= Gosu::Sample.new(tone_sample_path)
       @noise_sample ||= Gosu::Sample.new(noise_sample_path)
-      update_chunked
+      update
     end
 
     def update_chunked
       stop_looped_channels
-      samples = dc_block(@psg.render_frame_samples(samples_for_frame, FRAME_CYCLES, SAMPLE_RATE))
+      samples = dc_block!(@psg.render_frame_samples(samples_for_frame, FRAME_CYCLES, SAMPLE_RATE))
       return if samples.all? { |sample| sample.abs < 0.001 }
 
       path = chunk_sample_path
@@ -86,13 +91,20 @@ module AstralVerse
       @channels.clear
     end
 
-    def dc_block(samples)
-      samples.map do |sample|
+    def prebuffer_pipe(sample_count)
+      PIPE_PREBUFFER_CHUNKS.times { @sink.write_samples(Array.new(sample_count, 0.0), STREAM_GAIN) }
+      @pipe_prebuffered = true
+    end
+
+    def dc_block!(samples)
+      samples.each_index do |index|
+        sample = samples[index]
         output = sample - @dc_previous_input + 0.995 * @dc_previous_output
         @dc_previous_input = sample
         @dc_previous_output = output
-        output.clamp(-1.0, 1.0)
+        samples[index] = output.clamp(-1.0, 1.0)
       end
+      samples
     end
 
     def sync_channel(index, sample, frequency, volume, gain = TONE_GAIN, pitch: true)
@@ -156,6 +168,7 @@ module AstralVerse
 
     class PcmSink
       MAX_PENDING_CHUNKS = 24
+      DEFAULT_LATENCY_MS = 120
       CLOSE_SENTINEL = Object.new.freeze
 
       def initialize(sample_rate)
@@ -224,8 +237,9 @@ module AstralVerse
         command = if (native = native_sink_command)
                     native
                   elsif executable?('pw-cat')
+                    latency = ENV.fetch('ASTRAL_AUDIO_LATENCY_MS', DEFAULT_LATENCY_MS.to_s)
                     ['pw-cat', '--playback', '--raw', '--rate', @sample_rate.to_s,
-                     '--channels', '1', '--format', 's16', '--latency', '80ms', '-']
+                     '--channels', '1', '--format', 's16', '--latency', "#{latency}ms", '-']
                   elsif executable?('aplay')
                     ['aplay', '-q', '-t', 'raw', '-f', 'S16_LE', '-r', @sample_rate.to_s, '-c', '1', '-']
                   end
