@@ -12,6 +12,9 @@ module AstralVerse
       ui: {
         volume: 1.0,
         debug_mask: false,
+        scanlines: false,
+        scanline_strength: 0.35,
+        sharp_pixels: false,
         autostart: true
       },
       key_bindings: {},
@@ -71,6 +74,42 @@ module AstralVerse
       update_config(ui: { debug_mask: !!value })
     rescue => e
       puts "⚠️ Could not save debug mask: #{e.message}"
+    end
+
+    def self.scanlines?
+      !!config[:ui][:scanlines]
+    rescue
+      false
+    end
+
+    def self.save_scanlines(value)
+      update_config(ui: { scanlines: !!value })
+    rescue => e
+      puts "⚠️ Could not save scanlines: #{e.message}"
+    end
+
+    def self.scanline_strength
+      config[:ui][:scanline_strength].to_f.clamp(0.0, 1.0)
+    rescue
+      0.35
+    end
+
+    def self.save_scanline_strength(value)
+      update_config(ui: { scanline_strength: value.to_f.clamp(0.0, 1.0) })
+    rescue => e
+      puts "⚠️ Could not save scanline strength: #{e.message}"
+    end
+
+    def self.sharp_pixels?
+      !!config[:ui][:sharp_pixels]
+    rescue
+      false
+    end
+
+    def self.save_sharp_pixels(value)
+      update_config(ui: { sharp_pixels: !!value })
+    rescue => e
+      puts "⚠️ Could not save sharp pixels: #{e.message}"
     end
 
     def self.autostart?

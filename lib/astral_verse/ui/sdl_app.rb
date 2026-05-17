@@ -24,16 +24,17 @@ module AstralVerse
       ].compact.freeze
 
       TOOLBAR_BUTTONS = [
-        { label: 'Open', x: 4, w: 68, action: :open },
-        { label: 'Start', x: 78, w: 68, action: :start },
-        { label: 'Stop', x: 152, w: 68, action: :stop },
-        { label: 'Save', x: 226, w: 68, action: :save },
-        { label: 'Load', x: 300, w: 68, action: :load },
-        { label: 'Full', x: 374, w: 68, action: :fullscreen },
-        { label: 'Mask', x: 448, w: 82, action: :debug_mask },
-        { label: 'Keys', x: 538, w: 68, action: :key_bindings }
+        { label: 'Open', x: 4, w: 62, action: :open },
+        { label: 'Start', x: 72, w: 62, action: :start },
+        { label: 'Stop', x: 140, w: 62, action: :stop },
+        { label: 'Save', x: 208, w: 62, action: :save },
+        { label: 'Load', x: 276, w: 62, action: :load },
+        { label: 'Full', x: 344, w: 62, action: :fullscreen },
+        { label: 'Mask', x: 412, w: 74, action: :debug_mask },
+        { label: 'Keys', x: 494, w: 60, action: :key_bindings }
       ].freeze
-      VOLUME_SLIDER = { x: 614, y: 4, w: 146, h: TOOLBAR_H - 8 }.freeze
+      VOLUME_SLIDER = { x: 560, y: 4, w: 90, h: TOOLBAR_H - 8 }.freeze
+      SCANLINE_CONTROL = { x: 656, y: 4, w: 108, h: TOOLBAR_H - 8 }.freeze
       INPUT_ACTIONS = [
         { id: :up, label: 'Up', gesture: MysticTouch::GESTURE_NORTH, default: SDL3::K_UP, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_UP },
         { id: :down, label: 'Down', gesture: MysticTouch::GESTURE_SOUTH, default: SDL3::K_DOWN, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_DOWN },
@@ -88,9 +89,19 @@ module AstralVerse
         @palette_rgba = Array.new(64) do |value|
           [((value >> 0) & 0x03) * 85, ((value >> 2) & 0x03) * 85, ((value >> 4) & 0x03) * 85, 255].pack('C4')
         end
+        @sharp_palette_rgba = Array.new(64) do |value|
+          r = sharp_channel(((value >> 0) & 0x03) * 85)
+          g = sharp_channel(((value >> 2) & 0x03) * 85)
+          b = sharp_channel(((value >> 4) & 0x03) * 85)
+          [r, g, b, 255].pack('C4')
+        end
         @audio_player = nil
         @volume = ENV.fetch('ASTRAL_VOLUME', LastRelicCache.volume.to_s).to_f.clamp(0.0, 1.0)
         @dragging_volume = false
+        @scanlines = LastRelicCache.scanlines?
+        @scanline_strength = LastRelicCache.scanline_strength
+        @dragging_scanline_strength = false
+        @sharp_pixels = LastRelicCache.sharp_pixels?
         @autostart = LastRelicCache.autostart?
         @fullscreen = false
         @debug_mask = LastRelicCache.debug_mask?
@@ -137,6 +148,7 @@ module AstralVerse
         @window = SDL3.check(SDL3.create_window('AstralVerse SDL3', WIDTH, HEIGHT, flags), 'SDL_CreateWindow')
         @renderer = SDL3.check(SDL3.create_renderer(@window, nil), 'SDL_CreateRenderer')
         SDL3.set_render_vsync(@renderer, SDL3::RENDERER_VSYNC_DISABLED)
+        SDL3.set_render_draw_blend_mode(@renderer, SDL3::BLENDMODE_BLEND)
         @screen_texture = SDL3.check(SDL3.create_texture(@renderer, SDL3::PIXELFORMAT_RGBA32,
           SDL3::TEXTUREACCESS_STREAMING, SMS_W, SMS_H), 'SDL_CreateTexture')
         SDL3.set_texture_scale_mode(@screen_texture, SDL3::SCALEMODE_NEAREST)
@@ -188,9 +200,15 @@ module AstralVerse
           when SDL3::EVENT_MOUSE_BUTTON_DOWN
             handle_click(@event.get_uint8(24), @event.get_float32(28), @event.get_float32(32))
           when SDL3::EVENT_MOUSE_BUTTON_UP
-            if @event.get_uint8(24) == SDL3::BUTTON_LEFT && @dragging_volume
-              @dragging_volume = false
-              LastRelicCache.save_volume(@volume)
+            if @event.get_uint8(24) == SDL3::BUTTON_LEFT
+              if @dragging_volume
+                @dragging_volume = false
+                LastRelicCache.save_volume(@volume)
+              end
+              if @dragging_scanline_strength
+                @dragging_scanline_strength = false
+                LastRelicCache.save_scanline_strength(@scanline_strength)
+              end
             end
           when SDL3::EVENT_MOUSE_MOTION
             handle_mouse_motion(@event.get_float32(28), @event.get_float32(32))
@@ -314,6 +332,22 @@ module AstralVerse
             set_volume_from_x(x)
             return
           end
+          if scanline_checkbox_hit?(x, y)
+            @scanlines = !@scanlines
+            LastRelicCache.save_scanlines(@scanlines)
+            return
+          end
+          if sharp_pixels_hit?(x, y)
+            @sharp_pixels = !@sharp_pixels
+            @last_uploaded_render_version = nil
+            LastRelicCache.save_sharp_pixels(@sharp_pixels)
+            return
+          end
+          if scanline_slider_hit?(x, y)
+            @dragging_scanline_strength = true
+            set_scanline_strength_from_x(x)
+            return
+          end
 
           TOOLBAR_BUTTONS.each do |btn|
             next unless x >= btn[:x] && x <= btn[:x] + btn[:w]
@@ -328,6 +362,11 @@ module AstralVerse
         if @dragging_volume
           @last_mouse = [x, y]
           set_volume_from_x(x)
+          return
+        end
+        if @dragging_scanline_strength
+          @last_mouse = [x, y]
+          set_scanline_strength_from_x(x)
           return
         end
 
@@ -410,6 +449,7 @@ module AstralVerse
         if @stone.instance_variable_get(:@codex_present) && @stone.vision_sprite.scrying_pool&.any?
           update_screen_texture
           render_texture(@screen_texture, viewport[:x], viewport[:y], viewport[:w], viewport[:h])
+          draw_scanlines(viewport) if @scanlines && @scanline_strength.positive?
           draw_sms_debug_mask(viewport) if @debug_mask
         else
           msg = armed_relic_path ? "Armed: #{armed_relic_name(42)}" : 'No ROM armed'
@@ -439,6 +479,7 @@ module AstralVerse
           end
         end
         draw_volume_slider
+        draw_scanline_control
       end
 
       def draw_volume_slider
@@ -453,6 +494,25 @@ module AstralVerse
         fill_rect(track_x, track_y, track_w * @volume, 4, COLORS[:good])
         knob_x = track_x + track_w * @volume
         fill_rect(knob_x - 3, slider[:y] + 6, 6, slider[:h] - 12, COLORS[:text])
+      end
+
+      def draw_scanline_control
+        control = SCANLINE_CONTROL
+        hover = @last_mouse[1] <= TOOLBAR_H &&
+          (@last_mouse[0] >= control[:x] && @last_mouse[0] <= control[:x] + control[:w])
+        fill_rect(control[:x], control[:y], control[:w], control[:h], hover ? COLORS[:hover] : COLORS[:button])
+        draw_checkbox(control[:x] + 6, control[:y] + 8, @scanlines)
+        text('SL', control[:x] + 23, control[:y] + 7, 12, COLORS[:text])
+        track_x = scanline_track_x
+        track_y = control[:y] + control[:h] / 2 - 2
+        track_w = scanline_track_w
+        fill_rect(track_x, track_y, track_w, 4, [18, 12, 28, 255])
+        fill_rect(track_x, track_y, track_w * @scanline_strength, 4, COLORS[:good])
+        knob_x = track_x + track_w * @scanline_strength
+        fill_rect(knob_x - 3, control[:y] + 6, 6, control[:h] - 12, COLORS[:text])
+        sharp_x = control[:x] + 74
+        draw_checkbox(sharp_x, control[:y] + 8, @sharp_pixels)
+        text('Sh', sharp_x + 17, control[:y] + 7, 12, COLORS[:text])
       end
 
       def draw_keybindings_menu
@@ -502,6 +562,17 @@ module AstralVerse
       def draw_sms_debug_mask(viewport)
         pixel_width = viewport[:w] / SMS_W.to_f
         fill_rect(viewport[:x], viewport[:y], pixel_width * 8, viewport[:h], [0, 0, 0, 255])
+      end
+
+      def draw_scanlines(viewport)
+        pixel_h = viewport[:h] / SMS_H.to_f
+        line_h = [[pixel_h * 0.22, 1.0].max, pixel_h * 0.5].min
+        alpha = (170 * @scanline_strength).round.clamp(0, 170)
+        y = viewport[:y] + pixel_h - line_h
+        while y < viewport[:y] + viewport[:h]
+          fill_rect(viewport[:x], y, viewport[:w], line_h, [0, 0, 0, alpha])
+          y += pixel_h
+        end
       end
 
       def draw_status
@@ -859,21 +930,84 @@ module AstralVerse
         @audio_player.volume = @volume if @audio_player
       end
 
+      def scanline_checkbox_hit?(x, y)
+        control = SCANLINE_CONTROL
+        x >= control[:x] && x <= control[:x] + 42 && y >= control[:y] && y <= control[:y] + control[:h]
+      end
+
+      def scanline_slider_hit?(x, y)
+        control = SCANLINE_CONTROL
+        x >= scanline_track_x - 4 && x <= scanline_track_x + scanline_track_w + 4 &&
+          y >= control[:y] && y <= control[:y] + control[:h]
+      end
+
+      def sharp_pixels_hit?(x, y)
+        control = SCANLINE_CONTROL
+        x >= control[:x] + 70 && x <= control[:x] + control[:w] &&
+          y >= control[:y] && y <= control[:y] + control[:h]
+      end
+
+      def scanline_track_x
+        SCANLINE_CONTROL[:x] + 43
+      end
+
+      def scanline_track_w
+        25
+      end
+
+      def set_scanline_strength_from_x(x)
+        @scanline_strength = ((x - scanline_track_x) / scanline_track_w.to_f).clamp(0.0, 1.0)
+      end
+
       def update_screen_texture
         render_version = @stone.emulator.vdp.render_version
         return if @last_uploaded_render_version == render_version
 
         framebuffer = @stone.vision_sprite.scrying_pool
         @frame_rgba.clear
+        if @sharp_pixels
+          append_edge_sharpened_frame(framebuffer)
+        else
+          append_raw_frame(framebuffer)
+        end
+        @frame_pixels.put_bytes(0, @frame_rgba)
+        SDL3.update_texture(@screen_texture, nil, @frame_pixels, SMS_W * 4)
+        @last_uploaded_render_version = render_version
+      end
+
+      def append_raw_frame(framebuffer)
         pixel_count = SMS_W * SMS_H
         index = 0
         while index < pixel_count
           @frame_rgba << @palette_rgba[(framebuffer[index] || 0) & 0x3F]
           index += 1
         end
-        @frame_pixels.put_bytes(0, @frame_rgba)
-        SDL3.update_texture(@screen_texture, nil, @frame_pixels, SMS_W * 4)
-        @last_uploaded_render_version = render_version
+      end
+
+      def append_edge_sharpened_frame(framebuffer)
+        normal = @palette_rgba
+        sharp = @sharp_palette_rgba
+        last_x = SMS_W - 1
+        last_y = SMS_H - 1
+        y = 0
+        while y < SMS_H
+          row = y * SMS_W
+          x = 0
+          while x < SMS_W
+            index = row + x
+            color = (framebuffer[index] || 0) & 0x3F
+            edge = (x < last_x && ((framebuffer[index + 1] || 0) & 0x3F) != color) ||
+              (y < last_y && ((framebuffer[index + SMS_W] || 0) & 0x3F) != color)
+            @frame_rgba << (edge ? sharp[color] : normal[color])
+            x += 1
+          end
+          y += 1
+        end
+      end
+
+      def sharp_channel(value)
+        value = 127.5 + (value - 127.5) * 1.35
+        value.round.clamp(0, 255)
       end
 
       def screen_viewport

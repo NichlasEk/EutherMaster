@@ -18,6 +18,8 @@ module AstralVerse
     TEXTUREACCESS_STREAMING = 1
     SCALEMODE_NEAREST = 0
     RENDERER_VSYNC_DISABLED = 0
+    BLENDMODE_NONE = 0x00000000
+    BLENDMODE_BLEND = 0x00000001
     AUDIO_S16 = 0x8010
     AUDIO_DEVICE_DEFAULT_PLAYBACK = 0xFFFFFFFF
 
@@ -110,6 +112,7 @@ module AstralVerse
     attach_function :destroy_renderer, :SDL_DestroyRenderer, [:pointer], :void
     attach_function :set_render_vsync, :SDL_SetRenderVSync, [:pointer, :int], :bool
     attach_function :get_render_output_size, :SDL_GetRenderOutputSize, [:pointer, :pointer, :pointer], :bool
+    attach_function :set_render_draw_blend_mode, :SDL_SetRenderDrawBlendMode, [:pointer, :uint32], :bool
     attach_function :set_render_draw_color, :SDL_SetRenderDrawColor, [:pointer, :uint8, :uint8, :uint8, :uint8], :bool
     attach_function :render_clear, :SDL_RenderClear, [:pointer], :bool
     attach_function :render_present, :SDL_RenderPresent, [:pointer], :bool
