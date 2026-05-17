@@ -34,6 +34,7 @@ module AstralVerse
     K_ESCAPE = 0x0000001b
     K_SPACE = 0x00000020
     K_A = 0x00000061
+    K_P = 0x00000070
     K_R = 0x00000072
     K_S = 0x00000073
     K_X = 0x00000078

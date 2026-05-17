@@ -24,15 +24,27 @@ module AstralVerse
       ].compact.freeze
 
       TOOLBAR_BUTTONS = [
-        { label: 'Open', x: 8, w: 86, action: :open },
-        { label: 'Start', x: 102, w: 86, action: :start },
-        { label: 'Stop', x: 196, w: 86, action: :stop },
-        { label: 'Save', x: 290, w: 86, action: :save },
-        { label: 'Load', x: 384, w: 86, action: :load },
-        { label: 'Full', x: 478, w: 86, action: :fullscreen },
-        { label: 'Mask', x: 572, w: 92, action: :debug_mask }
+        { label: 'Open', x: 4, w: 68, action: :open },
+        { label: 'Start', x: 78, w: 68, action: :start },
+        { label: 'Stop', x: 152, w: 68, action: :stop },
+        { label: 'Save', x: 226, w: 68, action: :save },
+        { label: 'Load', x: 300, w: 68, action: :load },
+        { label: 'Full', x: 374, w: 68, action: :fullscreen },
+        { label: 'Mask', x: 448, w: 82, action: :debug_mask },
+        { label: 'Keys', x: 538, w: 68, action: :key_bindings }
       ].freeze
-      VOLUME_SLIDER = { x: 674, y: 4, w: 86, h: TOOLBAR_H - 8 }.freeze
+      VOLUME_SLIDER = { x: 614, y: 4, w: 146, h: TOOLBAR_H - 8 }.freeze
+      INPUT_ACTIONS = [
+        { id: :up, label: 'Up', gesture: MysticTouch::GESTURE_NORTH, default: SDL3::K_UP },
+        { id: :down, label: 'Down', gesture: MysticTouch::GESTURE_SOUTH, default: SDL3::K_DOWN },
+        { id: :left, label: 'Left', gesture: MysticTouch::GESTURE_WEST, default: SDL3::K_LEFT },
+        { id: :right, label: 'Right', gesture: MysticTouch::GESTURE_EAST, default: SDL3::K_RIGHT },
+        { id: :button_1, label: 'Button 1', gesture: MysticTouch::GESTURE_PRIMUS, default: SDL3::K_Z },
+        { id: :button_2, label: 'Button 2', gesture: MysticTouch::GESTURE_SECUNDUS, default: SDL3::K_X },
+        { id: :pause, label: 'Pause', special: :pause, default: SDL3::K_P },
+        { id: :reset, label: 'Reset', special: :reset, default: SDL3::K_R }
+      ].freeze
+      INPUT_ACTION_BY_ID = INPUT_ACTIONS.each_with_object({}) { |action, map| map[action[:id]] = action }.freeze
 
       COLORS = {
         bg: [18, 12, 28, 255],
@@ -57,6 +69,12 @@ module AstralVerse
         @closing = false
         @mode = :game
         @keys = {}
+        @input_dirty = true
+        @input_port_a = 0xFF
+        @key_bindings = load_key_bindings
+        rebuild_key_lookup
+        @keybindings_open = false
+        @binding_capture = nil
         @frame_count = 0
         @last_vision = now_ms
         @next_draw = 0.0
@@ -177,7 +195,14 @@ module AstralVerse
       end
 
       def handle_key(key, down, repeat)
+        if @binding_capture
+          capture_binding_key(key) if down && !repeat
+          return
+        end
+
+        previous = @keys[key]
         @keys[key] = down
+        @input_dirty = true if previous != down && @key_to_action[key]
         return if repeat && down
 
         if down
@@ -188,6 +213,8 @@ module AstralVerse
           when SDL3::K_ESCAPE
             if @mode == :browser
               @mode = :game
+            elsif @keybindings_open
+              @keybindings_open = false
             elsif @fullscreen
               toggle_fullscreen
             else
@@ -203,6 +230,17 @@ module AstralVerse
       def handle_game_key(key, down)
         return unless down
 
+        action_id = @key_to_action[key]
+        case INPUT_ACTION_BY_ID[action_id]&.[](:special)
+        when :pause
+          @stone.emulator.request_pause
+          return
+        when :reset
+          reset_game
+          return
+        end
+        return if action_id
+
         case key
         when SDL3::K_SPACE
           toggle_start
@@ -210,10 +248,6 @@ module AstralVerse
           save_state
         when SDL3::K_F9
           load_state
-        when SDL3::K_R
-          @stone.attune
-          @audio_player&.stop
-          @frame_count = 0
         end
       end
 
@@ -237,6 +271,8 @@ module AstralVerse
 
         if @mode == :browser
           click_browser(x, y)
+        elsif @keybindings_open
+          click_keybindings(x, y)
         elsif !@fullscreen && y <= TOOLBAR_H
           if volume_slider_hit?(x, y)
             @dragging_volume = true
@@ -295,6 +331,9 @@ module AstralVerse
         when :debug_mask
           @debug_mask = !@debug_mask
           LastRelicCache.save_debug_mask(@debug_mask)
+        when :key_bindings
+          @keybindings_open = !@keybindings_open
+          @binding_capture = nil unless @keybindings_open
         end
       end
 
@@ -347,6 +386,7 @@ module AstralVerse
 
         draw_toolbar
         draw_status
+        draw_keybindings_menu if @keybindings_open
       end
 
       def draw_toolbar
@@ -380,6 +420,33 @@ module AstralVerse
         fill_rect(knob_x - 3, slider[:y] + 6, 6, slider[:h] - 12, COLORS[:text])
       end
 
+      def draw_keybindings_menu
+        panel_w = [360, window_width - 32].min
+        row_h = 30
+        panel_h = 54 + INPUT_ACTIONS.length * row_h
+        x = [[window_width - panel_w - 12, 12].max, window_width - panel_w].min
+        y = TOOLBAR_H + 10
+        fill_rect(x, y, panel_w, panel_h, [22, 16, 40, 245])
+        fill_rect(x, y, panel_w, 1, COLORS[:border])
+        fill_rect(x, y + panel_h - 1, panel_w, 1, COLORS[:border])
+        fill_rect(x, y, 1, panel_h, COLORS[:border])
+        fill_rect(x + panel_w - 1, y, 1, panel_h, COLORS[:border])
+        text('Key Bindings', x + 14, y + 12, 16, COLORS[:text])
+        text('ESC closes', x + panel_w - 92, y + 14, 12, COLORS[:dim])
+
+        INPUT_ACTIONS.each_with_index do |action, index|
+          row_y = y + 44 + index * row_h
+          hover = @last_mouse[0] >= x + 8 && @last_mouse[0] <= x + panel_w - 8 &&
+            @last_mouse[1] >= row_y && @last_mouse[1] <= row_y + row_h - 3
+          active = @binding_capture == action[:id]
+          fill_rect(x + 8, row_y, panel_w - 16, row_h - 3, active ? COLORS[:hover] : (hover ? [42, 32, 70, 255] : COLORS[:panel]))
+          text(action[:label], x + 18, row_y + 7, 13, COLORS[:text])
+          value = active ? 'press key...' : key_name(@key_bindings[action[:id]])
+          color = active ? COLORS[:good] : COLORS[:dim]
+          text(value, x + panel_w - text_size(value, 13)[0] - 18, row_y + 7, 13, color)
+        end
+      end
+
       def draw_checkbox(x, y, checked)
         fill_rect(x, y, 12, 12, [18, 12, 28, 255])
         fill_rect(x, y, 12, 1, COLORS[:border])
@@ -399,7 +466,7 @@ module AstralVerse
         fill_rect(0, y, window_width, STATUS_H, [22, 16, 38, 255])
         label = cached_status_label
         text(label, 6, y + 7, 12, @running ? COLORS[:good] : COLORS[:warn])
-        hint = 'ESC = Exit | Arrows+Z/X = Input'
+        hint = 'ESC = Exit | Keys = Bindings'
         text(hint, window_width - text_size(hint, 12)[0] - 8, y + 7, 12, COLORS[:dim])
       end
 
@@ -577,15 +644,79 @@ module AstralVerse
       end
 
       def sync_game_input_state
+        return unless @input_dirty
+
+        keys = @keys
+        port = 0xFF
+        INPUT_ACTIONS.each do |action|
+          gesture = action[:gesture]
+          next unless gesture
+
+          port &= ~gesture if keys[@key_bindings[action[:id]]]
+        end
+
+        @input_port_a = port
         touch = @stone.mystic_touch
-        touch.left_palm = 0xFF
+        touch.left_palm = port
         touch.right_palm = 0xFF
-        touch.invoke(MysticTouch::GESTURE_NORTH) if @keys[SDL3::K_UP]
-        touch.invoke(MysticTouch::GESTURE_SOUTH) if @keys[SDL3::K_DOWN]
-        touch.invoke(MysticTouch::GESTURE_WEST) if @keys[SDL3::K_LEFT]
-        touch.invoke(MysticTouch::GESTURE_EAST) if @keys[SDL3::K_RIGHT]
-        touch.invoke(MysticTouch::GESTURE_PRIMUS) if @keys[SDL3::K_Z] || @keys[SDL3::K_A] || @keys[SDL3::K_RETURN]
-        touch.invoke(MysticTouch::GESTURE_SECUNDUS) if @keys[SDL3::K_X] || @keys[SDL3::K_S]
+        @input_dirty = false
+      end
+
+      def load_key_bindings
+        saved = LastRelicCache.key_bindings
+        INPUT_ACTIONS.each_with_object({}) do |action, bindings|
+          raw = saved[action[:id]]
+          key = raw.to_i
+          bindings[action[:id]] = key.positive? ? key : action[:default]
+        end
+      end
+
+      def rebuild_key_lookup
+        @key_to_action = {}
+        @key_bindings.each { |action, key| @key_to_action[key] = action }
+      end
+
+      def capture_binding_key(key)
+        if key == SDL3::K_ESCAPE
+          @binding_capture = nil
+          return
+        end
+
+        @key_bindings.each_key do |action|
+          @key_bindings[action] = 0 if @key_bindings[action] == key
+        end
+        @key_bindings[@binding_capture] = key
+        @keys.clear
+        @input_dirty = true
+        @binding_capture = nil
+        rebuild_key_lookup
+        LastRelicCache.save_key_bindings(@key_bindings)
+      end
+
+      def click_keybindings(x, y)
+        panel_w = [360, window_width - 32].min
+        row_h = 30
+        panel_h = 54 + INPUT_ACTIONS.length * row_h
+        panel_x = [[window_width - panel_w - 12, 12].max, window_width - panel_w].min
+        panel_y = TOOLBAR_H + 10
+        unless x >= panel_x && x <= panel_x + panel_w && y >= panel_y && y <= panel_y + panel_h
+          @keybindings_open = false
+          @binding_capture = nil
+          return
+        end
+
+        row = ((y - panel_y - 44) / row_h).floor
+        return unless row >= 0 && row < INPUT_ACTIONS.length
+
+        @binding_capture = INPUT_ACTIONS[row][:id]
+      end
+
+      def reset_game
+        @keys.clear
+        @input_dirty = true
+        @stone.attune
+        @audio_player&.stop
+        @frame_count = 0
       end
 
       def toggle_fullscreen
@@ -705,6 +836,25 @@ module AstralVerse
         texture_ptr = SDL3.check(SDL3.create_texture_from_surface(@renderer, surface_ptr), 'SDL_CreateTextureFromSurface')
         SDL3.destroy_surface(surface_ptr)
         @text_cache[key] = { ptr: texture_ptr, w: width, h: height }
+      end
+
+      def key_name(key)
+        return '-' if key.nil? || key.to_i <= 0
+
+        case key
+        when SDL3::K_UP then 'Up'
+        when SDL3::K_DOWN then 'Down'
+        when SDL3::K_LEFT then 'Left'
+        when SDL3::K_RIGHT then 'Right'
+        when SDL3::K_RETURN then 'Enter'
+        when SDL3::K_SPACE then 'Space'
+        when SDL3::K_ESCAPE then 'Esc'
+        when SDL3::K_F5 then 'F5'
+        when SDL3::K_F9 then 'F9'
+        when SDL3::K_F11 then 'F11'
+        else
+          key.between?(32, 126) ? key.chr.upcase : "0x#{key.to_s(16).upcase}"
+        end
       end
 
       def font(size)

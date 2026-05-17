@@ -17,6 +17,7 @@ module SmsEmulator
       @frame_count = 0
       @rom_loaded = false
       @fast_idle_enabled = false
+      @pause_requested = false
       reset_perf
     end
 
@@ -45,8 +46,13 @@ module SmsEmulator
       @vdp.reset
       @controller.reset
       @psg.reset
+      @pause_requested = false
       @frame_count = 0
       reset_perf
+    end
+
+    def request_pause
+      @pause_requested = true
     end
 
     def run_frame
@@ -56,6 +62,11 @@ module SmsEmulator
       cpu_started = frame_started
       cycles_this_frame = 0
       steps_this_frame = 0
+      if @pause_requested
+        cycles_this_frame += @cpu.nmi
+        steps_this_frame += 1
+        @pause_requested = false
+      end
       @vdp.begin_frame
       @psg.begin_frame
 
