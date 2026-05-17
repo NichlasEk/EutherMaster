@@ -13,8 +13,11 @@ module AstralVerse
     AUDIO_OVERSUPPLY = ENV.fetch('ASTRAL_AUDIO_OVERSUPPLY', '1.0005').to_f
     PIPE_PREBUFFER_CHUNKS = ENV.fetch('ASTRAL_AUDIO_PREBUFFER_CHUNKS', '4').to_i.clamp(0, 12)
 
+    attr_accessor :volume
+
     def initialize(psg)
       @psg = psg
+      @volume = 1.0
       @mode = ENV.fetch('ASTRAL_PSG_MODE', 'sdl')
       @sink = SdlSink.new(SAMPLE_RATE) if @mode == 'sdl'
       @sink = PcmSink.new(SAMPLE_RATE) if @mode == 'pipe'
@@ -33,6 +36,7 @@ module AstralVerse
     def update
       return if @disabled || !@psg
 
+      ensure_sink
       return update_pipe if @sink
     end
 
@@ -45,11 +49,21 @@ module AstralVerse
 
     private
 
+    def ensure_sink
+      return if @sink
+
+      @sink = SdlSink.new(SAMPLE_RATE) if @mode == 'sdl'
+      @sink = PcmSink.new(SAMPLE_RATE) if @mode == 'pipe'
+    rescue StandardError => e
+      warn "Audio disabled: #{e.message}"
+      @disabled = true
+    end
+
     def update_pipe
       count = samples_for_frame
       prebuffer_pipe(count) unless @pipe_prebuffered
       samples = dc_block!(@psg.render_frame_samples(count, FRAME_CYCLES, SAMPLE_RATE))
-      @sink.write_samples(samples, STREAM_GAIN)
+      @sink.write_samples(samples, STREAM_GAIN * @volume.to_f.clamp(0.0, 1.0))
     rescue IOError, Errno::EPIPE
       @sink&.close
       @sink = nil

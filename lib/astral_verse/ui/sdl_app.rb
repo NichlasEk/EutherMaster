@@ -29,8 +29,10 @@ module AstralVerse
         { label: 'Stop', x: 196, w: 86, action: :stop },
         { label: 'Save', x: 290, w: 86, action: :save },
         { label: 'Load', x: 384, w: 86, action: :load },
-        { label: 'Full', x: 478, w: 86, action: :fullscreen }
+        { label: 'Full', x: 478, w: 86, action: :fullscreen },
+        { label: 'Mask', x: 572, w: 92, action: :debug_mask }
       ].freeze
+      VOLUME_SLIDER = { x: 674, y: 4, w: 86, h: TOOLBAR_H - 8 }.freeze
 
       COLORS = {
         bg: [18, 12, 28, 255],
@@ -65,7 +67,11 @@ module AstralVerse
           [((value >> 0) & 0x03) * 85, ((value >> 2) & 0x03) * 85, ((value >> 4) & 0x03) * 85, 255].pack('C4')
         end
         @audio_player = nil
+        @volume = ENV.fetch('ASTRAL_VOLUME', LastRelicCache.volume.to_s).to_f.clamp(0.0, 1.0)
+        @dragging_volume = false
+        @autostart = LastRelicCache.autostart?
         @fullscreen = false
+        @debug_mask = LastRelicCache.debug_mask?
         @mouse_visible_until = 0
         @last_mouse = [0.0, 0.0]
         @browser_dir = LastRelicCache.last_dir
@@ -78,11 +84,13 @@ module AstralVerse
 
       def show
         init_sdl
-        @audio_player = PsgPlayer.new(@stone.emulator.psg)
+        @audio_player = build_audio_player
         open_window
+        autostart_loaded_relic
         loop_once while !@closing
       ensure
         @audio_player&.stop
+        LastRelicCache.save_volume(@volume)
         close_window
         SDL3TTF.quit if @ttf_ready
         SDL3.quit if @sdl_ready
@@ -155,6 +163,11 @@ module AstralVerse
             handle_key(@event.get_uint32(28), false, false)
           when SDL3::EVENT_MOUSE_BUTTON_DOWN
             handle_click(@event.get_uint8(24), @event.get_float32(28), @event.get_float32(32))
+          when SDL3::EVENT_MOUSE_BUTTON_UP
+            if @event.get_uint8(24) == SDL3::BUTTON_LEFT && @dragging_volume
+              @dragging_volume = false
+              LastRelicCache.save_volume(@volume)
+            end
           when SDL3::EVENT_MOUSE_MOTION
             handle_mouse_motion(@event.get_float32(28), @event.get_float32(32))
           when SDL3::EVENT_MOUSE_WHEEL
@@ -225,6 +238,12 @@ module AstralVerse
         if @mode == :browser
           click_browser(x, y)
         elsif !@fullscreen && y <= TOOLBAR_H
+          if volume_slider_hit?(x, y)
+            @dragging_volume = true
+            set_volume_from_x(x)
+            return
+          end
+
           TOOLBAR_BUTTONS.each do |btn|
             next unless x >= btn[:x] && x <= btn[:x] + btn[:w]
 
@@ -235,11 +254,18 @@ module AstralVerse
       end
 
       def handle_mouse_motion(x, y)
+        if @dragging_volume
+          @last_mouse = [x, y]
+          set_volume_from_x(x)
+          return
+        end
+
+        previous_mouse = @last_mouse
+        @last_mouse = [x, y]
         return unless @fullscreen
 
-        return if @last_mouse == [x, y]
+        return if previous_mouse == [x, y]
 
-        @last_mouse = [x, y]
         @mouse_visible_until = now_ms + 1400
         SDL3.show_cursor
       end
@@ -266,6 +292,9 @@ module AstralVerse
           load_state
         when :fullscreen
           toggle_fullscreen
+        when :debug_mask
+          @debug_mask = !@debug_mask
+          LastRelicCache.save_debug_mask(@debug_mask)
         end
       end
 
@@ -307,6 +336,7 @@ module AstralVerse
         if @stone.instance_variable_get(:@codex_present) && @stone.vision_sprite.scrying_pool&.any?
           update_screen_texture
           render_texture(@screen_texture, viewport[:x], viewport[:y], viewport[:w], viewport[:h])
+          draw_sms_debug_mask(viewport) if @debug_mask
         else
           msg = armed_relic_path ? "Armed: #{armed_relic_name(42)}" : 'No ROM armed'
           hint = armed_relic_path ? 'Click Start to run' : 'Click Open to select a ROM'
@@ -326,8 +356,42 @@ module AstralVerse
         TOOLBAR_BUTTONS.each do |btn|
           hover = my <= TOOLBAR_H && mx >= btn[:x] && mx <= btn[:x] + btn[:w]
           fill_rect(btn[:x], 4, btn[:w], TOOLBAR_H - 8, hover ? COLORS[:hover] : COLORS[:button])
-          text_center(btn[:label], btn[:x] + btn[:w] / 2, 11, 14, COLORS[:text], y_center: false)
+          if btn[:action] == :debug_mask
+            draw_checkbox(btn[:x] + 8, 12, @debug_mask)
+            text(btn[:label], btn[:x] + 28, 11, 14, COLORS[:text])
+          else
+            text_center(btn[:label], btn[:x] + btn[:w] / 2, 11, 14, COLORS[:text], y_center: false)
+          end
         end
+        draw_volume_slider
+      end
+
+      def draw_volume_slider
+        slider = VOLUME_SLIDER
+        hover = @last_mouse[1] <= TOOLBAR_H && volume_slider_hit?(@last_mouse[0], @last_mouse[1])
+        fill_rect(slider[:x], slider[:y], slider[:w], slider[:h], hover ? COLORS[:hover] : COLORS[:button])
+        text('Vol', slider[:x] + 7, slider[:y] + 7, 12, COLORS[:text])
+        track_x = slider[:x] + 36
+        track_y = slider[:y] + slider[:h] / 2 - 2
+        track_w = slider[:w] - 46
+        fill_rect(track_x, track_y, track_w, 4, [18, 12, 28, 255])
+        fill_rect(track_x, track_y, track_w * @volume, 4, COLORS[:good])
+        knob_x = track_x + track_w * @volume
+        fill_rect(knob_x - 3, slider[:y] + 6, 6, slider[:h] - 12, COLORS[:text])
+      end
+
+      def draw_checkbox(x, y, checked)
+        fill_rect(x, y, 12, 12, [18, 12, 28, 255])
+        fill_rect(x, y, 12, 1, COLORS[:border])
+        fill_rect(x, y + 11, 12, 1, COLORS[:border])
+        fill_rect(x, y, 1, 12, COLORS[:border])
+        fill_rect(x + 11, y, 1, 12, COLORS[:border])
+        fill_rect(x + 3, y + 3, 6, 6, COLORS[:good]) if checked
+      end
+
+      def draw_sms_debug_mask(viewport)
+        pixel_width = viewport[:w] / SMS_W.to_f
+        fill_rect(viewport[:x], viewport[:y], pixel_width * 8, viewport[:h], [0, 0, 0, 255])
       end
 
       def draw_status
@@ -462,19 +526,19 @@ module AstralVerse
           LastRelicCache.save_rom_dir(File.dirname(entry[:path]))
           @selected_path = entry[:path]
           @mode = :game
-          load_selected_relic(entry[:path])
+          load_selected_relic(entry[:path], autostart: @autostart)
         end
       end
 
-      def load_selected_relic(path)
+      def load_selected_relic(path, autostart: false)
         was_running = @running
         @running = false
         @audio_player&.stop
         @stone.absorb_codex(path)
-        @audio_player = PsgPlayer.new(@stone.emulator.psg)
+        @audio_player = build_audio_player
         @frame_count = 0
         @last_vision = now_ms
-        @running = was_running
+        @running = autostart || was_running
         flash_status("Armed #{File.basename(path)}")
       rescue => e
         flash_status("Open failed: #{e.message}")
@@ -502,7 +566,7 @@ module AstralVerse
         @running = false
         @audio_player&.stop
         path = @stone.load_snapshot
-        @audio_player = PsgPlayer.new(@stone.emulator.psg)
+        @audio_player = build_audio_player
         @frame_count = @stone.emulator.frame_count
         @last_vision = now_ms
         @running = was_running
@@ -530,6 +594,33 @@ module AstralVerse
         @mouse_visible_until = 0
         SDL3.hide_cursor if @fullscreen
         SDL3.show_cursor unless @fullscreen
+      end
+
+      def build_audio_player
+        player = PsgPlayer.new(@stone.emulator.psg)
+        player.volume = @volume
+        player
+      end
+
+      def autostart_loaded_relic
+        return unless @stone.instance_variable_get(:@codex_present)
+        return unless @autostart
+
+        @running = true
+        @last_vision = now_ms
+      end
+
+      def volume_slider_hit?(x, y)
+        slider = VOLUME_SLIDER
+        x >= slider[:x] && x <= slider[:x] + slider[:w] && y >= slider[:y] && y <= slider[:y] + slider[:h]
+      end
+
+      def set_volume_from_x(x)
+        slider = VOLUME_SLIDER
+        track_x = slider[:x] + 36
+        track_w = slider[:w] - 46
+        @volume = ((x - track_x) / track_w.to_f).clamp(0.0, 1.0)
+        @audio_player.volume = @volume if @audio_player
       end
 
       def update_screen_texture
