@@ -15,7 +15,7 @@ module AstralVerse
       FRAME_MS = 1000.0 / 60.0
       MAX_CATCHUP_FRAMES = 4
 
-      ROM_EXTENSIONS = ['.sms', '.gg', '.bin', '.rom'].freeze
+      ROM_EXTENSIONS = AstralVerse::RomDetector::ROM_EXTENSIONS
       FONT_CANDIDATES = [
         ENV['ASTRAL_FONT'],
         '/usr/share/fonts/noto/NotoSansMono-Regular.ttf',
@@ -613,7 +613,8 @@ module AstralVerse
           y = row_top + (idx - @browser_scroll) * row_h
           fill_rect(list_x + 4 * scale, y, list_w - 8 * scale, row_h - 2 * scale, entry[:type] == :rom ? [50, 80, 50, 255] : COLORS[:hover]) if idx == @browser_selected
           color = entry[:type] == :rom ? COLORS[:rom] : (entry[:type] == :file ? COLORS[:dim] : COLORS[:folder])
-          name = "#{entry[:type] == :dir || entry[:type] == :parent ? '[D]' : '[F]'} #{entry[:name]}"
+          prefix = entry[:type] == :dir || entry[:type] == :parent ? '[D]' : (entry[:rom]&.label || '[F]')
+          name = "#{prefix} #{entry[:name]}"
           text(truncate_to_width(name, list_w - 220 * scale, (24 * scale).to_i), list_x + 14 * scale, y + 10 * scale, (24 * scale).to_i, color)
           text(entry[:size], list_x + list_w - 130 * scale, y + 14 * scale, (16 * scale).to_i, COLORS[:dim]) if list_w > 500 * scale
         end
@@ -673,7 +674,8 @@ module AstralVerse
         dirs.each { |name| result << { name: name, path: File.join(dir, name), type: :dir, size: '-' } }
         files.each do |name|
           path = File.join(dir, name)
-          result << { name: name, path: path, type: rom_file?(name) ? :rom : :file, size: format_size(File.size(path)) }
+          rom = detect_rom(path)
+          result << { name: name, path: path, type: rom ? :rom : :file, size: format_size(File.size(path)), rom: rom }
         end
         result
       rescue SystemCallError
@@ -720,7 +722,7 @@ module AstralVerse
         @frame_count = 0
         @last_vision = now_ms
         @running = autostart || was_running
-        flash_status("Armed #{File.basename(path)}")
+        flash_status("Armed #{system_label} #{File.basename(path)}")
       rescue => e
         flash_status("Open failed: #{e.message}")
       end
@@ -960,7 +962,7 @@ module AstralVerse
       end
 
       def update_screen_texture
-        render_version = @stone.emulator.vdp.render_version
+        render_version = emulator_render_version
         return if @last_uploaded_render_version == render_version
 
         framebuffer = @stone.vision_sprite.scrying_pool
@@ -973,6 +975,17 @@ module AstralVerse
         @frame_pixels.put_bytes(0, @frame_rgba)
         SDL3.update_texture(@screen_texture, nil, @frame_pixels, SMS_W * 4)
         @last_uploaded_render_version = render_version
+      end
+
+      def emulator_render_version
+        emulator = @stone.emulator
+        if emulator.respond_to?(:vdp)
+          emulator.vdp.render_version
+        elsif emulator.respond_to?(:render_version)
+          emulator.render_version
+        else
+          @frame_count
+        end
       end
 
       def append_raw_frame(framebuffer)
@@ -1165,11 +1178,15 @@ module AstralVerse
         name.length > max_length ? "#{name[0...(max_length - 3)]}..." : name
       end
 
+      def system_label
+        @stone.rom_info&.label || 'ROM'
+      end
+
       def status_label
         if @status_flash && now_ms < @status_flash_until
           @status_flash
         elsif armed_relic_path
-          label = "#{@running ? 'Run' : 'Stop'} Frame: #{@frame_count} | #{armed_relic_name(28)}"
+          label = "#{@running ? 'Run' : 'Stop'} Frame: #{@frame_count} | #{system_label} | #{armed_relic_name(28)}"
           label = "#{label} | #{perf_label}" if @running
           label
         else
@@ -1202,6 +1219,12 @@ module AstralVerse
 
       def rom_file?(filename)
         ROM_EXTENSIONS.any? { |ext| filename.downcase.end_with?(ext) }
+      end
+
+      def detect_rom(path)
+        return nil unless rom_file?(path)
+
+        RomDetector.detect_file(path)
       end
 
       def format_size(bytes)

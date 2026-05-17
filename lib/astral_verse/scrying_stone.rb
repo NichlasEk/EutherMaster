@@ -2,9 +2,11 @@ module AstralVerse
   class ScryingStone
     require 'fileutils'
     require 'time'
+    require_relative 'rom_detector'
     require_relative '../sms_emulator'
+    require_relative '../mega_drive'
 
-    attr_reader :gem_heart, :vision_sprite, :crystal_vault, :mystic_touch, :emulator
+    attr_reader :gem_heart, :vision_sprite, :crystal_vault, :mystic_touch, :emulator, :rom_info
 
     # Master System pulses: GemHeart ~3.58 MHz, VisionSprite ~10.7 MHz
     # One full vision: 262 astral threads (NTSC), 313 (PAL)
@@ -18,20 +20,39 @@ module AstralVerse
       @vision_sprite = VisionSprite.new
       @mystic_touch = MysticTouch.new
       @emulator = SmsEmulator::Emulator.new
+      @rom_info = nil
       @vision_count = 0
       @codex_present = false
     end
 
     def absorb_codex(path)
+      info = RomDetector.detect_file(path)
+      raise "Unsupported ROM type" unless info
+
       @crystal_vault.inscribe_codex_from_path(path)
-      @emulator.load_rom(path)
+      @rom_info = info
+      @emulator = build_emulator(info)
+      if info.mega_drive?
+        @emulator.load_rom(path, info: info)
+      else
+        @emulator.load_rom(path)
+      end
       @codex_present = true
       attune
     end
 
     def absorb_codex_essence(essence)
+      info = RomDetector.detect(essence) ||
+        RomDetector::Info.new(system: :sms, format: :sms_family, path: nil, name: nil, header_offset: nil, copier_header: false)
+
       @crystal_vault.inscribe_codex(essence)
-      @emulator.load_rom_data(essence)
+      @rom_info = info
+      @emulator = build_emulator(info)
+      if info.mega_drive?
+        @emulator.load_rom_data(essence, info: info)
+      else
+        @emulator.load_rom_data(essence)
+      end
       @codex_present = true
       attune
     end
@@ -50,7 +71,8 @@ module AstralVerse
       if @emulator
         sync_controller
         @emulator.run_frame
-        @vision_sprite.bind_scrying_pool(@emulator.vdp.framebuffer)
+        framebuffer = @emulator.respond_to?(:vdp) ? @emulator.vdp.framebuffer : @emulator.framebuffer
+        @vision_sprite.bind_scrying_pool(framebuffer)
         @vision_count += 1
         return
       end
@@ -93,6 +115,7 @@ module AstralVerse
         saved_at: Time.now.utc.iso8601,
         relic_path: @crystal_vault.relic_path,
         codex_present: @codex_present,
+        rom_info: @rom_info,
         vision_count: @vision_count,
         emulator: @emulator,
         mystic_touch: @mystic_touch,
@@ -112,6 +135,7 @@ module AstralVerse
       @crystal_vault.inscribe_codex_from_path(relic_path) if relic_path && File.exist?(relic_path)
       @emulator = payload.fetch(:emulator)
       @emulator.rewire_after_snapshot_load if @emulator.respond_to?(:rewire_after_snapshot_load)
+      @rom_info = payload[:rom_info]
       @mystic_touch = payload.fetch(:mystic_touch)
       @codex_present = payload.fetch(:codex_present)
       @vision_count = payload.fetch(:vision_count)
@@ -124,9 +148,15 @@ module AstralVerse
     end
 
     def sync_controller
+      return unless @emulator.respond_to?(:controller) && @emulator.controller
+
       controller = @emulator.controller
       controller.port_a = @mystic_touch.left_palm
       controller.port_b = @mystic_touch.right_palm
+    end
+
+    def build_emulator(info)
+      info.mega_drive? ? MegaDrive::Emulator.new : SmsEmulator::Emulator.new
     end
   end
 end
