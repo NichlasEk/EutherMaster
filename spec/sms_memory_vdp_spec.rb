@@ -319,6 +319,29 @@ RSpec.describe SmsEmulator::VDP do
     expect(vdp.framebuffer[8]).to eq(0x11)
   end
 
+  it 'wraps horizontal background scroll so priority stays aligned with pixels' do
+    vdp = described_class.new
+    vdp.registers[1] = 0x40
+    vdp.registers[2] = 0x0E
+    vdp.registers[5] = 0x7E
+    vdp.registers[8] = 1
+    vdp.cram[1] = 0x11
+    vdp.cram[17] = 0x22
+    sprite_base = 0x3F00
+
+    vdp.vram[0x383E] = 1
+    vdp.vram[0x383F] = 0x10
+    vdp.vram[32] = 0x01
+    vdp.vram[sprite_base] = 0xFF
+    vdp.vram[sprite_base + 0x80] = 0
+    vdp.vram[sprite_base + 0x81] = 2
+    vdp.vram[64] = 0x80
+
+    vdp.render_scanline(0)
+
+    expect(vdp.framebuffer[0]).to eq(0x11)
+  end
+
   it 'does not mask bit 10 from mode 4 name table addresses' do
     vdp = described_class.new
     vdp.registers[1] = 0x40
