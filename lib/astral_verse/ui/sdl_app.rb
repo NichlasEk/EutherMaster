@@ -58,6 +58,8 @@ module AstralVerse
         @frame_count = 0
         @last_vision = now_ms
         @next_draw = 0.0
+        @status_label_cache = nil
+        @status_label_until = 0.0
         @frame_rgba = String.new(capacity: SMS_W * SMS_H * 4, encoding: Encoding::BINARY)
         @palette_rgba = Array.new(64) do |value|
           [((value >> 0) & 0x03) * 85, ((value >> 2) & 0x03) * 85, ((value >> 4) & 0x03) * 85, 255].pack('C4')
@@ -107,6 +109,18 @@ module AstralVerse
         @screen_texture = SDL3.check(SDL3.create_texture(@renderer, SDL3::PIXELFORMAT_RGBA32,
           SDL3::TEXTUREACCESS_STREAMING, SMS_W, SMS_H), 'SDL_CreateTexture')
         SDL3.set_texture_scale_mode(@screen_texture, SDL3::SCALEMODE_NEAREST)
+        @event = FFI::MemoryPointer.new(:uint8, 128)
+        @size_w_ptr = FFI::MemoryPointer.new(:int)
+        @size_h_ptr = FFI::MemoryPointer.new(:int)
+        @rect = SDL3::FRect.new
+        @frame_pixels = FFI::MemoryPointer.new(:uint8, SMS_W * SMS_H * 4)
+        @text_size_w = FFI::MemoryPointer.new(:int)
+        @text_size_h = FFI::MemoryPointer.new(:int)
+        @text_size_cache = {}
+        @render_width = WIDTH
+        @render_height = HEIGHT
+        @last_uploaded_render_version = nil
+        refresh_output_size
       end
 
       def close_window
@@ -130,22 +144,21 @@ module AstralVerse
       end
 
       def poll_events
-        event = FFI::MemoryPointer.new(:uint8, 128)
-        while SDL3.poll_event(event)
-          type = event.read_uint32
+        while SDL3.poll_event(@event)
+          type = @event.read_uint32
           case type
           when SDL3::EVENT_QUIT
             @closing = true
           when SDL3::EVENT_KEY_DOWN
-            handle_key(event.get_uint32(28), true, event.get_uint8(37) != 0)
+            handle_key(@event.get_uint32(28), true, @event.get_uint8(37) != 0)
           when SDL3::EVENT_KEY_UP
-            handle_key(event.get_uint32(28), false, false)
+            handle_key(@event.get_uint32(28), false, false)
           when SDL3::EVENT_MOUSE_BUTTON_DOWN
-            handle_click(event.get_uint8(24), event.get_float32(28), event.get_float32(32))
+            handle_click(@event.get_uint8(24), @event.get_float32(28), @event.get_float32(32))
           when SDL3::EVENT_MOUSE_MOTION
-            handle_mouse_motion(event.get_float32(28), event.get_float32(32))
+            handle_mouse_motion(@event.get_float32(28), @event.get_float32(32))
           when SDL3::EVENT_MOUSE_WHEEL
-            handle_wheel(event.get_float32(28))
+            handle_wheel(@event.get_float32(28))
           end
         end
       end
@@ -282,6 +295,7 @@ module AstralVerse
       end
 
       def draw
+        refresh_output_size
         clear(*COLORS[:bg])
         @mode == :browser ? draw_browser : draw_game
         SDL3.render_present(@renderer)
@@ -319,7 +333,7 @@ module AstralVerse
       def draw_status
         y = window_height - STATUS_H
         fill_rect(0, y, window_width, STATUS_H, [22, 16, 38, 255])
-        label = status_label
+        label = cached_status_label
         text(label, 6, y + 7, 12, @running ? COLORS[:good] : COLORS[:warn])
         hint = 'ESC = Exit | Arrows+Z/X = Input'
         text(hint, window_width - text_size(hint, 12)[0] - 8, y + 7, 12, COLORS[:dim])
@@ -519,10 +533,20 @@ module AstralVerse
       end
 
       def update_screen_texture
+        render_version = @stone.emulator.vdp.render_version
+        return if @last_uploaded_render_version == render_version
+
         framebuffer = @stone.vision_sprite.scrying_pool
         @frame_rgba.clear
-        framebuffer.first(SMS_W * SMS_H).each { |value| @frame_rgba << @palette_rgba[(value || 0) & 0x3F] }
-        SDL3.update_texture(@screen_texture, nil, FFI::MemoryPointer.from_string(@frame_rgba), SMS_W * 4)
+        pixel_count = SMS_W * SMS_H
+        index = 0
+        while index < pixel_count
+          @frame_rgba << @palette_rgba[(framebuffer[index] || 0) & 0x3F]
+          index += 1
+        end
+        @frame_pixels.put_bytes(0, @frame_rgba)
+        SDL3.update_texture(@screen_texture, nil, @frame_pixels, SMS_W * 4)
+        @last_uploaded_render_version = render_version
       end
 
       def screen_viewport
@@ -548,15 +572,13 @@ module AstralVerse
 
       def fill_rect(x, y, w, h, color)
         SDL3.set_render_draw_color(@renderer, *color)
-        rect = SDL3::FRect.new
-        rect[:x], rect[:y], rect[:w], rect[:h] = x.to_f, y.to_f, w.to_f, h.to_f
-        SDL3.render_fill_rect(@renderer, rect)
+        @rect[:x], @rect[:y], @rect[:w], @rect[:h] = x.to_f, y.to_f, w.to_f, h.to_f
+        SDL3.render_fill_rect(@renderer, @rect)
       end
 
       def render_texture(texture, x, y, w, h)
-        rect = SDL3::FRect.new
-        rect[:x], rect[:y], rect[:w], rect[:h] = x.to_f, y.to_f, w.to_f, h.to_f
-        SDL3.render_texture(@renderer, texture, nil, rect)
+        @rect[:x], @rect[:y], @rect[:w], @rect[:h] = x.to_f, y.to_f, w.to_f, h.to_f
+        SDL3.render_texture(@renderer, texture, nil, @rect)
       end
 
       def text(str, x, y, size, color)
@@ -570,11 +592,12 @@ module AstralVerse
       end
 
       def text_size(str, size)
+        key = [str, size]
+        return @text_size_cache[key] if @text_size_cache[key]
+
         font = font(size)
-        w = FFI::MemoryPointer.new(:int)
-        h = FFI::MemoryPointer.new(:int)
-        SDL3TTF.get_string_size(font, str, str.bytesize, w, h)
-        [w.read_int, h.read_int]
+        SDL3TTF.get_string_size(font, str, str.bytesize, @text_size_w, @text_size_h)
+        @text_size_cache[key] = [@text_size_w.read_int, @text_size_h.read_int]
       end
 
       def text_texture(str, size, color)
@@ -607,15 +630,17 @@ module AstralVerse
       end
 
       def window_width
-        ptr = FFI::MemoryPointer.new(:int)
-        SDL3.get_render_output_size(@renderer, ptr, nil)
-        ptr.read_int
+        @render_width
       end
 
       def window_height
-        ptr = FFI::MemoryPointer.new(:int)
-        SDL3.get_render_output_size(@renderer, nil, ptr)
-        ptr.read_int
+        @render_height
+      end
+
+      def refresh_output_size
+        SDL3.get_render_output_size(@renderer, @size_w_ptr, @size_h_ptr)
+        @render_width = @size_w_ptr.read_int
+        @render_height = @size_h_ptr.read_int
       end
 
       def now_ms
@@ -652,9 +677,21 @@ module AstralVerse
         end
       end
 
+      def cached_status_label
+        now = now_ms
+        if @status_label_cache && now < @status_label_until
+          return @status_label_cache
+        end
+
+        @status_label_cache = status_label
+        @status_label_until = now + 250
+        @status_label_cache
+      end
+
       def flash_status(message)
         @status_flash = message
         @status_flash_until = now_ms + 2500
+        @status_label_cache = nil
         puts message
       end
 
