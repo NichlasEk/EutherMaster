@@ -1,5 +1,3 @@
-require 'gosu'
-
 module AstralVerse
   class LastRelicCache
     CACHE_FILE = '.astralverse_cache'.freeze

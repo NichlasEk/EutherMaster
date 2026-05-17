@@ -34,34 +34,9 @@ loop do
   end
 
   begin
-    require_relative '../lib/astral_verse/ui/crystal_window'
-    window = AstralVerse::CrystalWindow.new(stone)
-    window.show
-
-    # After window closes, check what user wants
-    if window.needs_pick?
-      puts "📂 Opening Relic Explorer..."
-
-      require_relative '../lib/astral_verse/ui/file_browser'
-      browser = AstralVerse::UI::FileBrowser.new(AstralVerse::LastRelicCache.last_dir)
-      browser.show
-
-      if browser.selected_path
-        AstralVerse::LastRelicCache.save_relic(browser.selected_path)
-        puts "💎 Armed relic: #{File.basename(browser.selected_path)}"
-        exec({ 'ASTRAL_RESTARTED_AFTER_PICK' => '1' }, RbConfig.ruby, $PROGRAM_NAME, *ARGV)
-      else
-        puts "❌ No relic selected."
-        break
-      end
-    elsif window.needs_start?
-      # Start was clicked but no ROM loaded yet
-      puts "⚠️ No relic armed. Use Open to select one."
-      next
-    else
-      # User pressed ESC without requesting anything
-      break
-    end
+    require_relative '../lib/astral_verse/ui/sdl_app'
+    AstralVerse::UI::SDLApp.new(stone).show
+    break
   rescue Interrupt
     puts ""
     puts "✨ Interrupted by cosmic forces."

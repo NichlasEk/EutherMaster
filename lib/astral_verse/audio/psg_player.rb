@@ -16,8 +16,7 @@ module AstralVerse
       @psg = psg
       @mode = ENV.fetch('ASTRAL_PSG_MODE', 'pipe')
       @sink = PcmSink.new(SAMPLE_RATE) if @mode == 'pipe'
-      @tone_sample = Gosu::Sample.new(tone_sample_path) unless @sink
-      @noise_sample = Gosu::Sample.new(noise_sample_path) unless @sink
+      raise 'Only pipe PSG audio is supported in the SDL3 backend' unless @sink
       @channels = Array.new(4)
       @chunk_index = 0
       @dc_previous_input = 0.0
@@ -33,15 +32,6 @@ module AstralVerse
       return if @disabled || !@psg
 
       return update_pipe if @sink
-      return update_chunked if @mode == 'chunked'
-
-      state = @psg.audible_state
-      state[:tones].each_with_index do |tone, index|
-        sync_channel(index, @tone_sample, tone[:frequency], tone[:volume])
-      end
-
-      noise = state[:noise]
-      sync_channel(3, @noise_sample, noise[:frequency], noise[:volume], NOISE_GAIN)
     end
 
     def stop
@@ -61,20 +51,7 @@ module AstralVerse
     rescue IOError, Errno::EPIPE
       @sink&.close
       @sink = nil
-      @mode = 'loop'
-      @tone_sample ||= Gosu::Sample.new(tone_sample_path)
-      @noise_sample ||= Gosu::Sample.new(noise_sample_path)
-      update
-    end
-
-    def update_chunked
-      stop_looped_channels
-      samples = dc_block!(@psg.render_frame_samples(samples_for_frame, FRAME_CYCLES, SAMPLE_RATE))
-      return if samples.all? { |sample| sample.abs < 0.001 }
-
-      path = chunk_sample_path
-      write_wav(path, samples.map { |sample| (sample * 24_000).clamp(-32_768, 32_767).to_i })
-      Gosu::Sample.new(path).play(STREAM_GAIN, 1.0, false)
+      @disabled = true
     end
 
     def samples_for_frame
@@ -82,13 +59,6 @@ module AstralVerse
       count = @sample_credit.floor
       @sample_credit -= count
       count
-    end
-
-    def stop_looped_channels
-      return if @channels.empty?
-
-      @channels.each { |channel| channel&.stop }
-      @channels.clear
     end
 
     def prebuffer_pipe(sample_count)

@@ -79,8 +79,8 @@ module AstralVerse
     end
 
     def awaken
-      require_relative 'ui/crystal_window'
-      window = CrystalWindow.new(self)
+      require_relative 'ui/sdl_app'
+      window = UI::SDLApp.new(self)
       window.show
     end
 
