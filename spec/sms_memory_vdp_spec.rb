@@ -43,7 +43,7 @@ RSpec.describe SmsEmulator::Memory do
     expect(memory.read_byte(1)).to eq(0x56)
   end
 
-  it 'maps Codemasters cartridges through writes at 0000/4000/8000' do
+  it 'maps Codemasters cartridges through writes in each 16KB mapper range' do
     with_forced_sms_mapper('codemasters') do
       data = Array.new(0x10000, 0)
       data[0x0000] = 0x10
@@ -57,11 +57,46 @@ RSpec.describe SmsEmulator::Memory do
       expect(memory.mapper_type).to eq(:codemasters)
       expect(memory.read_byte(0x8000)).to eq(0x10)
 
-      memory.write_byte(0x8000, 3)
+      memory.write_byte(0x8123, 3)
       expect(memory.read_byte(0x8000)).to eq(0x40)
 
-      memory.write_byte(0x0000, 2)
+      memory.write_byte(0x0123, 2)
       expect(memory.read_byte(0x0000)).to eq(0x30)
+
+      memory.write_byte(0x4567, 3)
+      expect(memory.read_byte(0x4000)).to eq(0x40)
+    end
+  end
+
+  it 'enables Codemasters RAM from the high bit in the second mapper range' do
+    with_forced_sms_mapper('codemasters') do
+      data = Array.new(0x10000, 0)
+      data[0x0000] = 0x10
+      data[0x2000] = 0x31
+      data[0x4000] = 0x20
+      data[0x8000] = 0x30
+
+      memory = described_class.new
+      memory.load_rom(data)
+
+      memory.write_byte(0x4000, 0x80)
+      memory.write_byte(0xA123, 0x5A)
+
+      expect(memory.read_byte(0x8000)).to eq(0x10)
+      expect(memory.read_byte(0xA123)).to eq(0x5A)
+    end
+  end
+
+  it 'does not mirror Codemasters mapper registers into system RAM' do
+    with_forced_sms_mapper('codemasters') do
+      memory = described_class.new
+      memory.load_rom(Array.new(0x10000, 0))
+
+      expect(memory.read_byte(0xFFFE)).to eq(0)
+
+      memory.write_byte(0x8000, 3)
+
+      expect(memory.read_byte(0xFFFE)).to eq(0)
     end
   end
 
@@ -104,6 +139,23 @@ RSpec.describe SmsEmulator::Memory do
     memory.load_rom(data)
 
     expect(memory.mapper_type).to eq(:codemasters)
+  end
+
+  it 'matches EutherDrive SMS priority for ambiguous Korean A000 patterns' do
+    data = Array.new(512 * 1024, 0)
+    writes = [[0x0000, 2], [0x4000, 2], [0x8000, 2], [0xA000, 8]]
+    offset = 0x0100
+    writes.each do |addr, count|
+      count.times do
+        data[offset, 3] = [0x32, addr & 0xFF, addr >> 8]
+        offset += 3
+      end
+    end
+
+    memory = described_class.new
+    memory.load_rom(data)
+
+    expect(memory.mapper_type).to eq(:korean_a000)
   end
 
   def with_forced_sms_mapper(mapper)
@@ -248,6 +300,23 @@ RSpec.describe SmsEmulator::VDP do
     expect(vdp.framebuffer[8]).to eq(0x11)
   end
 
+  it 'does not mask bit 10 from mode 4 name table addresses' do
+    vdp = described_class.new
+    vdp.registers[1] = 0x40
+    vdp.registers[2] = 0x0E
+    vdp.cram[1] = 0x11
+    vdp.cram[2] = 0x22
+
+    vdp.vram[0x3800] = 1
+    vdp.vram[0x3C00] = 2
+    vdp.vram[32] = 0x80
+    vdp.vram[65] = 0x80
+
+    vdp.render_scanline(128)
+
+    expect(vdp.framebuffer[128 * described_class::SMS_WIDTH]).to eq(0x22)
+  end
+
   it 'uses the VDP read buffer and prefetches on VRAM read commands' do
     vdp = described_class.new
     vdp.vram[0x1234] = 0xAB
@@ -269,6 +338,20 @@ RSpec.describe SmsEmulator::VDP do
 
     expect(vdp.registers[1]).to eq(0xE0)
     expect(vdp.vram[0x01E0]).to eq(0x44)
+  end
+
+  it 'uses VDP register 15 as the data port auto-increment' do
+    vdp = described_class.new
+
+    vdp.write_control(0x02)
+    vdp.write_control(0x8F)
+    vdp.write_control(0x00)
+    vdp.write_control(0x40)
+    vdp.write_data(0xAA)
+    vdp.write_data(0xBB)
+
+    expect(vdp.vram[0x0000]).to eq(0xAA)
+    expect(vdp.vram[0x0002]).to eq(0xBB)
   end
 
   it 'keeps address high bits when a new control sequence writes only the low byte first' do

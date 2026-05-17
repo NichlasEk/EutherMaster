@@ -3,7 +3,7 @@ module SmsEmulator
     attr_accessor :a, :b, :c, :d, :e, :f, :h, :l
     attr_accessor :pc, :sp, :ix, :iy, :i, :r
     attr_accessor :halted, :iff1, :iff2, :im
-    attr_reader :memory, :cycles, :total_cycles
+    attr_reader :memory, :cycles, :total_cycles, :last_run_steps
 
     FLAG_C = 0x01
     FLAG_N = 0x02
@@ -19,6 +19,15 @@ module SmsEmulator
     RP = [:bc, :de, :hl, :sp].freeze
     RP2 = [:bc, :de, :hl, :af].freeze
     PARITY = Array.new(256) { |value| value.to_s(2).count('1').even? ? FLAG_P : 0 }.freeze
+    SZ_FLAGS = Array.new(256) { |value| (value & 0x80 != 0 ? FLAG_S : 0) | (value == 0 ? FLAG_Z : 0) }.freeze
+    INC8_FLAGS = Array.new(256) do |value|
+      res = (value + 1) & 0xFF
+      SZ_FLAGS[res] | (res & FLAG_YX) | (value == 0x7F ? FLAG_P : 0) | ((value & 0x0F) == 0x0F ? FLAG_H : 0)
+    end.freeze
+    DEC8_FLAGS = Array.new(256) do |value|
+      res = (value - 1) & 0xFF
+      SZ_FLAGS[res] | (res & FLAG_YX) | (value == 0x80 ? FLAG_P : 0) | ((value & 0x0F) == 0 ? FLAG_H : 0) | FLAG_N
+    end.freeze
 
     def initialize(memory)
       @memory = memory
@@ -39,6 +48,7 @@ module SmsEmulator
       @im = 0
       @cycles = 0
       @total_cycles = 0
+      @last_run_steps = 0
     end
 
     def af = ((@a << 8) | @f)
@@ -79,12 +89,538 @@ module SmsEmulator
       end
 
       @cycles = 0
+      @opcode_counts[read_byte(@pc)] += 1 if @opcode_counts
       execute_opcode(fetch_opcode)
       @iff1 = @iff2 = true if @ei_pending_done
       @ei_pending_done = @ei_pending
       @ei_pending = false
       @total_cycles += @cycles
       @cycles
+    end
+
+    def enable_opcode_counts!
+      @opcode_counts = Array.new(256, 0)
+      @cb_opcode_counts = Array.new(256, 0)
+      @ed_opcode_counts = Array.new(256, 0)
+    end
+
+    def opcode_counts
+      @opcode_counts || Array.new(256, 0)
+    end
+
+    def cb_opcode_counts
+      @cb_opcode_counts || Array.new(256, 0)
+    end
+
+    def ed_opcode_counts
+      @ed_opcode_counts || Array.new(256, 0)
+    end
+
+    def run_cycles(max_cycles)
+      return 0 if max_cycles <= 0
+
+      direct = @memory.respond_to?(:direct_cpu_memory) ? @memory.direct_cpu_memory : nil
+      return run_cycles_direct(max_cycles, direct) if direct
+      return run_cycles_bus(max_cycles) if @memory.respond_to?(:fast_cpu_bus?)
+
+      ran = 0
+      steps = 0
+      while ran < max_cycles
+        ran += step
+        steps += 1
+      end
+      @last_run_steps = steps
+      ran
+    end
+
+    def run_cycles_bus(max_cycles)
+      if @halted
+        cycles = max_cycles
+        @cycles = cycles
+        @total_cycles += cycles
+        @last_run_steps = (cycles + 3) / 4
+        return cycles
+      end
+
+      total = 0
+      steps = 0
+      memory = @memory
+      counts = @opcode_counts
+
+      while total < max_cycles && !@halted
+        opcode = memory.read_byte(@pc) & 0xFF
+        @pc = (@pc + 1) & 0xFFFF
+        @r = ((@r + 1) & 0x7F) | (@r & 0x80)
+        counts[opcode] += 1 if counts
+
+        case opcode
+        when 0x00
+          @cycles = 4
+        when 0x04
+          old = @b
+          @b = (old + 1) & 0xFF
+          @f = INC8_FLAGS[old] | (@f & FLAG_C)
+          @cycles = 4
+        when 0x05
+          old = @b
+          @b = (old - 1) & 0xFF
+          @f = DEC8_FLAGS[old] | (@f & FLAG_C)
+          @cycles = 4
+        when 0x06
+          @b = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x0C
+          old = @c
+          @c = (old + 1) & 0xFF
+          @f = INC8_FLAGS[old] | (@f & FLAG_C)
+          @cycles = 4
+        when 0x0E
+          @c = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x10
+          @b = (@b - 1) & 0xFF
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          if @b != 0
+            @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            @cycles = 13
+          else
+            @cycles = 8
+          end
+        when 0x13
+          value = (((@d << 8) | @e) + 1) & 0xFFFF
+          @d = (value >> 8) & 0xFF
+          @e = value & 0xFF
+          @cycles = 6
+        when 0x16
+          @d = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x1A
+          @a = memory.read_byte((@d << 8) | @e) & 0xFF
+          @cycles = 7
+        when 0x1E
+          @e = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x18
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+          @cycles = 12
+        when 0x20
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          if (@f & FLAG_Z).zero?
+            @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            @cycles = 12
+          else
+            @cycles = 7
+          end
+        when 0x21
+          @l = memory.read_byte(@pc) & 0xFF
+          @h = memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF
+          @pc = (@pc + 2) & 0xFFFF
+          @cycles = 10
+        when 0x23
+          value = (((@h << 8) | @l) + 1) & 0xFFFF
+          @h = (value >> 8) & 0xFF
+          @l = value & 0xFF
+          @cycles = 6
+        when 0x26
+          @h = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x28
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          if (@f & FLAG_Z) != 0
+            @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            @cycles = 12
+          else
+            @cycles = 7
+          end
+        when 0x2E
+          @l = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x2F
+          @a ^= 0xFF
+          @f = (@f & (FLAG_S | FLAG_Z | FLAG_P | FLAG_C)) | (@a & FLAG_YX) | FLAG_H | FLAG_N
+          @cycles = 4
+        when 0x30
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          if (@f & FLAG_C).zero?
+            @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            @cycles = 12
+          else
+            @cycles = 7
+          end
+        when 0x38
+          disp = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          if (@f & FLAG_C) != 0
+            @pc = (@pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            @cycles = 12
+          else
+            @cycles = 7
+          end
+        when 0x3A
+          addr = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
+          @pc = (@pc + 2) & 0xFFFF
+          @a = memory.read_byte(addr) & 0xFF
+          @cycles = 13
+        when 0x3E
+          @a = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @cycles = 7
+        when 0x4F
+          @c = @a
+          @cycles = 4
+        when 0x77
+          memory.write_byte((@h << 8) | @l, @a)
+          @cycles = 7
+        when 0x78
+          @a = @b
+          @cycles = 4
+        when 0x79
+          @a = @c
+          @cycles = 4
+        when 0x7E
+          @a = memory.read_byte((@h << 8) | @l) & 0xFF
+          @cycles = 7
+        when 0xA6
+          @a &= memory.read_byte((@h << 8) | @l) & 0xFF
+          @f = szp(@a) | (@a & FLAG_YX) | FLAG_H
+          @cycles = 7
+        when 0xAF
+          @a = 0
+          @f = FLAG_Z | FLAG_P
+          @cycles = 4
+        when 0xB0
+          @a |= @b
+          @f = szp(@a) | (@a & FLAG_YX)
+          @cycles = 4
+        when 0xB7
+          @f = szp(@a) | (@a & FLAG_YX)
+          @cycles = 4
+        when 0xC3
+          @pc = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
+          @cycles = 10
+        when 0xCD
+          addr = (memory.read_byte(@pc) & 0xFF) | ((memory.read_byte((@pc + 1) & 0xFFFF) & 0xFF) << 8)
+          @pc = (@pc + 2) & 0xFFFF
+          @sp = (@sp - 1) & 0xFFFF
+          memory.write_byte(@sp, @pc >> 8)
+          @sp = (@sp - 1) & 0xFFFF
+          memory.write_byte(@sp, @pc)
+          @pc = addr
+          @cycles = 17
+        when 0xD3
+          port = ((@a << 8) | (memory.read_byte(@pc) & 0xFF)) & 0xFFFF
+          @pc = (@pc + 1) & 0xFFFF
+          write_io(port, @a)
+          @cycles = 11
+        when 0xE6
+          @a &= memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @f = szp(@a) | (@a & FLAG_YX) | FLAG_H
+          @cycles = 7
+        when 0xC9
+          lo = memory.read_byte(@sp) & 0xFF
+          @sp = (@sp + 1) & 0xFFFF
+          hi = memory.read_byte(@sp) & 0xFF
+          @sp = (@sp + 1) & 0xFFFF
+          @pc = (hi << 8) | lo
+          @cycles = 10
+        when 0xFE
+          value = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          res = @a - value
+          @f = flags_sub(@a, value, res, 0)
+          @f = (@f & ~FLAG_YX) | (value & FLAG_YX)
+          @cycles = 7
+        when 0xCB
+          cb = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @r = ((@r + 1) & 0x7F) | (@r & 0x80)
+          @cb_opcode_counts[cb] += 1 if @cb_opcode_counts
+          case cb
+          when 0x11 # RL C
+            old = @c
+            @c = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+            @f = szp(@c) | (@c & FLAG_YX) | (old >> 7)
+            @cycles = 8
+          when 0x17 # RL A
+            old = @a
+            @a = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+            @f = szp(@a) | (@a & FLAG_YX) | (old >> 7)
+            @cycles = 8
+          when 0x1A # RR D
+            old = @d
+            @d = ((old >> 1) | ((@f & FLAG_C).zero? ? 0 : 0x80)) & 0xFF
+            @f = szp(@d) | (@d & FLAG_YX) | (old & FLAG_C)
+            @cycles = 8
+          when 0x1B # RR E
+            old = @e
+            @e = ((old >> 1) | ((@f & FLAG_C).zero? ? 0 : 0x80)) & 0xFF
+            @f = szp(@e) | (@e & FLAG_YX) | (old & FLAG_C)
+            @cycles = 8
+          when 0x23 # SLA E
+            old = @e
+            @e = (old << 1) & 0xFF
+            @f = szp(@e) | (@e & FLAG_YX) | (old >> 7)
+            @cycles = 8
+          when 0x3F # SRL A
+            old = @a
+            @a = old >> 1
+            @f = szp(@a) | (@a & FLAG_YX) | (old & FLAG_C)
+            @cycles = 8
+          when 0x16 # RL (HL)
+            address = (@h << 8) | @l
+            old = memory.read_byte(address) & 0xFF
+            value = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+            memory.write_byte(address, value)
+            @f = szp(value) | (value & FLAG_YX) | (old >> 7)
+            @cycles = 15
+          when 0x26 # SLA (HL)
+            address = (@h << 8) | @l
+            old = memory.read_byte(address) & 0xFF
+            value = (old << 1) & 0xFF
+            memory.write_byte(address, value)
+            @f = szp(value) | (value & FLAG_YX) | (old >> 7)
+            @cycles = 15
+          else
+            execute_cb(cb, nil, nil)
+          end
+        when 0xED
+          ed = memory.read_byte(@pc) & 0xFF
+          @pc = (@pc + 1) & 0xFFFF
+          @r = ((@r + 1) & 0x7F) | (@r & 0x80)
+          @ed_opcode_counts[ed] += 1 if @ed_opcode_counts
+          case ed
+          when 0xB0
+            hl_value = (@h << 8) | @l
+            de_value = (@d << 8) | @e
+            bc_value = (@b << 8) | @c
+            value = memory.read_byte(hl_value) & 0xFF
+            memory.write_byte(de_value, value)
+            hl_value = (hl_value + 1) & 0xFFFF
+            de_value = (de_value + 1) & 0xFFFF
+            bc_value = (bc_value - 1) & 0xFFFF
+            @h = (hl_value >> 8) & 0xFF
+            @l = hl_value & 0xFF
+            @d = (de_value >> 8) & 0xFF
+            @e = de_value & 0xFF
+            @b = (bc_value >> 8) & 0xFF
+            @c = bc_value & 0xFF
+            n = (@a + value) & 0xFF
+            @f = (@f & (FLAG_S | FLAG_Z | FLAG_C)) | (bc_value != 0 ? FLAG_P : 0) | (n & FLAG_3) | ((n << 4) & FLAG_5)
+            @pc = (@pc - 2) & 0xFFFF if bc_value != 0
+            @cycles = bc_value == 0 ? 16 : 21
+          when 0xB3
+            hl_value = (@h << 8) | @l
+            value = memory.read_byte(hl_value) & 0xFF
+            @b = (@b - 1) & 0xFF
+            write_io((@b << 8) | @c, value)
+            hl_value = (hl_value + 1) & 0xFFFF
+            @h = (hl_value >> 8) & 0xFF
+            @l = hl_value & 0xFF
+            @f = (@b == 0 ? FLAG_Z : 0) | (@b & FLAG_S) | FLAG_N | (@b & FLAG_YX)
+            @pc = (@pc - 2) & 0xFFFF if @b != 0
+            @cycles = @b == 0 ? 16 : 21
+          else
+            execute_ed(ed)
+          end
+        else
+          @cycles = 0
+          execute_opcode(opcode)
+        end
+
+        @iff1 = @iff2 = true if @ei_pending_done
+        @ei_pending_done = @ei_pending
+        @ei_pending = false
+        total += @cycles
+        steps += 1
+      end
+
+      @total_cycles += total
+      @last_run_steps = steps
+      total
+    end
+
+    def run_cycles_direct(max_cycles, mem)
+      a = @a; b = @b; c = @c; d = @d; e = @e; f = @f; h = @h; l = @l
+      pc = @pc; sp = @sp; r = @r
+      total = 0
+      steps = 0
+      counts = @opcode_counts
+      sz = SZ_FLAGS
+      inc_flags = INC8_FLAGS
+      dec_flags = DEC8_FLAGS
+
+      while total < max_cycles
+        opcode = mem[pc] & 0xFF
+        pc = (pc + 1) & 0xFFFF
+        r = ((r + 1) & 0x7F) | (r & 0x80)
+        counts[opcode] += 1 if counts
+
+        case opcode
+        when 0x00 # NOP
+          total += 4
+        when 0x3E # LD A,n
+          a = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x06 # LD B,n
+          b = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x0E # LD C,n
+          c = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x16 # LD D,n
+          d = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x1E # LD E,n
+          e = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x26 # LD H,n
+          h = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x2E # LD L,n
+          l = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          total += 7
+        when 0x7F then total += 4 # LD A,A
+        when 0x78 then a = b; total += 4
+        when 0x79 then a = c; total += 4
+        when 0x7A then a = d; total += 4
+        when 0x7B then a = e; total += 4
+        when 0x7C then a = h; total += 4
+        when 0x7D then a = l; total += 4
+        when 0x47 then b = a; total += 4
+        when 0x4F then c = a; total += 4
+        when 0x57 then d = a; total += 4
+        when 0x5F then e = a; total += 4
+        when 0x67 then h = a; total += 4
+        when 0x6F then l = a; total += 4
+        when 0x04
+          carry = f & FLAG_C; b = (b + 1) & 0xFF; f = inc_flags[(b - 1) & 0xFF] | carry; total += 4
+        when 0x0C
+          carry = f & FLAG_C; c = (c + 1) & 0xFF; f = inc_flags[(c - 1) & 0xFF] | carry; total += 4
+        when 0x14
+          carry = f & FLAG_C; d = (d + 1) & 0xFF; f = inc_flags[(d - 1) & 0xFF] | carry; total += 4
+        when 0x1C
+          carry = f & FLAG_C; e = (e + 1) & 0xFF; f = inc_flags[(e - 1) & 0xFF] | carry; total += 4
+        when 0x24
+          carry = f & FLAG_C; h = (h + 1) & 0xFF; f = inc_flags[(h - 1) & 0xFF] | carry; total += 4
+        when 0x2C
+          carry = f & FLAG_C; l = (l + 1) & 0xFF; f = inc_flags[(l - 1) & 0xFF] | carry; total += 4
+        when 0x3C
+          carry = f & FLAG_C; a = (a + 1) & 0xFF; f = inc_flags[(a - 1) & 0xFF] | carry; total += 4
+        when 0x05
+          carry = f & FLAG_C; old = b; b = (b - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x0D
+          carry = f & FLAG_C; old = c; c = (c - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x15
+          carry = f & FLAG_C; old = d; d = (d - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x1D
+          carry = f & FLAG_C; old = e; e = (e - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x25
+          carry = f & FLAG_C; old = h; h = (h - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x2D
+          carry = f & FLAG_C; old = l; l = (l - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0x3D
+          carry = f & FLAG_C; old = a; a = (a - 1) & 0xFF; f = dec_flags[old] | carry; total += 4
+        when 0xAF # XOR A
+          a = 0
+          f = FLAG_Z | FLAG_P
+          total += 4
+        when 0xA8 # XOR B
+          a ^= b; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xA9
+          a ^= c; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xAA
+          a ^= d; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xAB
+          a ^= e; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xAC
+          a ^= h; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xAD
+          a ^= l; f = sz[a] | PARITY[a] | (a & FLAG_YX); total += 4
+        when 0xB7 # OR A
+          f = sz[a] | PARITY[a] | (a & FLAG_YX)
+          total += 4
+        when 0xFE # CP n
+          value = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          res = a - value
+          out = res & 0xFF
+          f = sz[out] | FLAG_N | (value & FLAG_YX)
+          f |= FLAG_H if ((a ^ value ^ out) & 0x10) != 0
+          f |= FLAG_C if res < 0
+          f |= FLAG_P if ((a ^ value) & (a ^ out) & 0x80) != 0
+          total += 7
+        when 0x18 # JR e
+          disp = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          pc = (pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+          total += 12
+        when 0x20 # JR NZ,e
+          disp = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          if (f & FLAG_Z).zero?
+            pc = (pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            total += 12
+          else
+            total += 7
+          end
+        when 0x28 # JR Z,e
+          disp = mem[pc] & 0xFF
+          pc = (pc + 1) & 0xFFFF
+          if (f & FLAG_Z) != 0
+            pc = (pc + (disp >= 0x80 ? disp - 0x100 : disp)) & 0xFFFF
+            total += 12
+          else
+            total += 7
+          end
+        when 0xC3 # JP nn
+          pc = (mem[pc] & 0xFF) | ((mem[(pc + 1) & 0xFFFF] & 0xFF) << 8)
+          total += 10
+        when 0x21 # LD HL,nn
+          l = mem[pc] & 0xFF
+          h = mem[(pc + 1) & 0xFFFF] & 0xFF
+          pc = (pc + 2) & 0xFFFF
+          total += 10
+        when 0x31 # LD SP,nn
+          sp = (mem[pc] & 0xFF) | ((mem[(pc + 1) & 0xFFFF] & 0xFF) << 8)
+          pc = (pc + 2) & 0xFFFF
+          total += 10
+        else
+          @a = a; @b = b; @c = c; @d = d; @e = e; @f = f; @h = h; @l = l
+          @pc = pc; @sp = sp; @r = r; @cycles = 0
+          execute_opcode(opcode)
+          total += @cycles
+          a = @a; b = @b; c = @c; d = @d; e = @e; f = @f; h = @h; l = @l
+          pc = @pc; sp = @sp; r = @r
+        end
+        steps += 1
+      end
+
+      @a = a; @b = b; @c = c; @d = d; @e = e; @f = f; @h = h; @l = l
+      @pc = pc; @sp = sp; @r = r
+      @cycles = total
+      @total_cycles += total
+      @last_run_steps = steps
+      total
     end
 
     def fast_forward_idle_loop(max_cycles)
@@ -127,6 +663,25 @@ module SmsEmulator
     def execute_base(opcode, index)
       if opcode >= 0x40 && opcode <= 0x7F
         return halt if opcode == 0x76
+        unless index
+          case opcode
+          when 0x77
+            @memory.write_byte((@h << 8) | @l, @a)
+            return finish(7)
+          when 0x7E
+            @a = @memory.read_byte((@h << 8) | @l) & 0xFF
+            return finish(7)
+          when 0x78
+            @a = @b
+            return finish(4)
+          when 0x79
+            @a = @c
+            return finish(4)
+          when 0x4F
+            @c = @a
+            return finish(4)
+          end
+        end
         dst = (opcode >> 3) & 7
         src = opcode & 7
         if index && (dst == 6 || src == 6)
@@ -138,6 +693,23 @@ module SmsEmulator
       end
 
       if opcode >= 0x80 && opcode <= 0xBF
+        unless index
+          case opcode
+          when 0xA6
+            @a &= @memory.read_byte((@h << 8) | @l) & 0xFF
+            @f = szp(@a) | (@a & FLAG_YX) | FLAG_H
+            return finish(7)
+          when 0xB0
+            @a |= @b
+            @f = szp(@a) | (@a & FLAG_YX)
+            return finish(4)
+          when 0x91
+            res = @a - @c
+            @f = flags_sub(@a, @c, res, 0)
+            @a = res & 0xFF
+            return finish(4)
+          end
+        end
         op = (opcode >> 3) & 7
         src = opcode & 7
         alu(op, read_reg8(src, index))
@@ -155,7 +727,17 @@ module SmsEmulator
       when 0x1A then @a = read_byte(de); finish(7)
       when 0x03, 0x13, 0x23, 0x33
         rp = (opcode >> 4) & 3
-        set_rp(rp, (get_rp(rp, index) + 1) & 0xFFFF, index)
+        if !index && opcode == 0x13
+          value = (((@d << 8) | @e) + 1) & 0xFFFF
+          @d = (value >> 8) & 0xFF
+          @e = value & 0xFF
+        elsif !index && opcode == 0x23
+          value = (((@h << 8) | @l) + 1) & 0xFFFF
+          @h = (value >> 8) & 0xFF
+          @l = value & 0xFF
+        else
+          set_rp(rp, (get_rp(rp, index) + 1) & 0xFFFF, index)
+        end
         finish(index && opcode == 0x23 ? 10 : 6)
       when 0x0B, 0x1B, 0x2B, 0x3B
         rp = (opcode >> 4) & 3
@@ -209,7 +791,12 @@ module SmsEmulator
         end
       when 0x18 then jr(fetch_byte); finish(12)
       when 0x20, 0x28, 0x30, 0x38
-        cond = condition_met((opcode >> 3) & 3)
+        cond = case opcode
+               when 0x20 then (@f & FLAG_Z).zero?
+               when 0x28 then (@f & FLAG_Z) != 0
+               when 0x30 then (@f & FLAG_C).zero?
+               else (@f & FLAG_C) != 0
+               end
         disp = fetch_byte
         jr(disp) if cond
         finish(cond ? 12 : 7)
@@ -282,6 +869,55 @@ module SmsEmulator
     end
 
     def execute_cb(opcode, index, addr)
+      @cb_opcode_counts[opcode] += 1 if @cb_opcode_counts && !index && !addr
+      unless index || addr
+        case opcode
+        when 0x11 # RL C
+          old = @c
+          @c = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+          @f = szp(@c) | (@c & FLAG_YX) | (old >> 7)
+          return finish(8)
+        when 0x17 # RL A
+          old = @a
+          @a = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+          @f = szp(@a) | (@a & FLAG_YX) | (old >> 7)
+          return finish(8)
+        when 0x1A # RR D
+          old = @d
+          @d = ((old >> 1) | ((@f & FLAG_C).zero? ? 0 : 0x80)) & 0xFF
+          @f = szp(@d) | (@d & FLAG_YX) | (old & FLAG_C)
+          return finish(8)
+        when 0x1B # RR E
+          old = @e
+          @e = ((old >> 1) | ((@f & FLAG_C).zero? ? 0 : 0x80)) & 0xFF
+          @f = szp(@e) | (@e & FLAG_YX) | (old & FLAG_C)
+          return finish(8)
+        when 0x23 # SLA E
+          old = @e
+          @e = (old << 1) & 0xFF
+          @f = szp(@e) | (@e & FLAG_YX) | (old >> 7)
+          return finish(8)
+        when 0x3F # SRL A
+          old = @a
+          @a = old >> 1
+          @f = szp(@a) | (@a & FLAG_YX) | (old & FLAG_C)
+          return finish(8)
+        when 0x16 # RL (HL)
+          address = (@h << 8) | @l
+          old = @memory.read_byte(address) & 0xFF
+          value = ((old << 1) | ((@f & FLAG_C).zero? ? 0 : 1)) & 0xFF
+          @memory.write_byte(address, value)
+          @f = szp(value) | (value & FLAG_YX) | (old >> 7)
+          return finish(15)
+        when 0x26 # SLA (HL)
+          address = (@h << 8) | @l
+          old = @memory.read_byte(address) & 0xFF
+          value = (old << 1) & 0xFF
+          @memory.write_byte(address, value)
+          @f = szp(value) | (value & FLAG_YX) | (old >> 7)
+          return finish(15)
+        end
+      end
       x = opcode >> 6
       y = (opcode >> 3) & 7
       z = opcode & 7
@@ -324,6 +960,7 @@ module SmsEmulator
     end
 
     def execute_ed(opcode)
+      @ed_opcode_counts[opcode] += 1 if @ed_opcode_counts
       case opcode
       when 0x40, 0x48, 0x50, 0x58, 0x60, 0x68, 0x78
         reg = (opcode >> 3) & 7
@@ -363,7 +1000,25 @@ module SmsEmulator
       when 0x6F then rld; finish(18)
       when 0xA0 then ldi(1); finish(16)
       when 0xA8 then ldi(-1); finish(16)
-      when 0xB0 then block_ldi(1); finish(bc == 0 ? 16 : 21)
+      when 0xB0
+        hl_value = (@h << 8) | @l
+        de_value = (@d << 8) | @e
+        bc_value = (@b << 8) | @c
+        value = @memory.read_byte(hl_value) & 0xFF
+        @memory.write_byte(de_value, value)
+        hl_value = (hl_value + 1) & 0xFFFF
+        de_value = (de_value + 1) & 0xFFFF
+        bc_value = (bc_value - 1) & 0xFFFF
+        @h = (hl_value >> 8) & 0xFF
+        @l = hl_value & 0xFF
+        @d = (de_value >> 8) & 0xFF
+        @e = de_value & 0xFF
+        @b = (bc_value >> 8) & 0xFF
+        @c = bc_value & 0xFF
+        n = (@a + value) & 0xFF
+        @f = (@f & (FLAG_S | FLAG_Z | FLAG_C)) | (bc_value != 0 ? FLAG_P : 0) | (n & FLAG_3) | ((n << 4) & FLAG_5)
+        @pc = (@pc - 2) & 0xFFFF if bc_value != 0
+        finish(bc_value == 0 ? 16 : 21)
       when 0xB8 then block_ldi(-1); finish(bc == 0 ? 16 : 21)
       when 0xA1 then cpi(1); finish(16)
       when 0xA9 then cpi(-1); finish(16)
@@ -375,7 +1030,17 @@ module SmsEmulator
       when 0xBA then block_ini(-1); finish(@b == 0 ? 16 : 21)
       when 0xA3 then outi(1); finish(16)
       when 0xAB then outi(-1); finish(16)
-      when 0xB3 then block_outi(1); finish(@b == 0 ? 16 : 21)
+      when 0xB3
+        hl_value = (@h << 8) | @l
+        value = @memory.read_byte(hl_value) & 0xFF
+        @b = (@b - 1) & 0xFF
+        write_io((@b << 8) | @c, value)
+        hl_value = (hl_value + 1) & 0xFFFF
+        @h = (hl_value >> 8) & 0xFF
+        @l = hl_value & 0xFF
+        @f = (@b == 0 ? FLAG_Z : 0) | (@b & FLAG_S) | FLAG_N | (@b & FLAG_YX)
+        @pc = (@pc - 2) & 0xFFFF if @b != 0
+        finish(@b == 0 ? 16 : 21)
       when 0xBB then block_outi(-1); finish(@b == 0 ? 16 : 21)
       else finish(8)
       end
@@ -582,14 +1247,14 @@ module SmsEmulator
     def inc8(value)
       res = (value + 1) & 0xFF
       carry = @f & FLAG_C
-      @f = sz_flags(res) | (res & FLAG_YX) | (value == 0x7F ? FLAG_P : 0) | ((value & 0x0F) == 0x0F ? FLAG_H : 0) | carry
+      @f = INC8_FLAGS[value & 0xFF] | carry
       res
     end
 
     def dec8(value)
       res = (value - 1) & 0xFF
       carry = @f & FLAG_C
-      @f = sz_flags(res) | (res & FLAG_YX) | (value == 0x80 ? FLAG_P : 0) | ((value & 0x0F) == 0 ? FLAG_H : 0) | FLAG_N | carry
+      @f = DEC8_FLAGS[value & 0xFF] | carry
       res
     end
 
@@ -841,7 +1506,7 @@ module SmsEmulator
     end
 
     def sz_flags(value)
-      (value & 0x80 != 0 ? FLAG_S : 0) | (value == 0 ? FLAG_Z : 0)
+      SZ_FLAGS[value & 0xFF]
     end
 
     def szp(value)

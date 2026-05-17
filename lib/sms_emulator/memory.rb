@@ -32,7 +32,7 @@ module SmsEmulator
       sync_bank_offsets
       @ram.fill(0)
       @cart_ram.fill(0)
-      sync_mapper_ram
+      sync_mapper_ram if @mapper_type == :sega
       @rom.fill(0)
       size = [@cartridge.length, ROM_SIZE].min
       @rom[0, size] = @cartridge[0, size]
@@ -82,6 +82,10 @@ module SmsEmulator
     def write_word(addr, value)
       write_byte(addr, value & 0xFF)
       write_byte(addr + 1, (value >> 8) & 0xFF)
+    end
+
+    def fast_cpu_bus?
+      true
     end
 
     def read_io(port)
@@ -174,15 +178,15 @@ module SmsEmulator
     def write_codemasters_mapper(addr, value)
       bank = (value & 0x7F) % @bank_count
 
-      if addr == 0x0000
+      if addr <= 0x3FFF
         set_bank(1, bank)
-      elsif addr == 0x4000
+      elsif addr <= 0x7FFF
         set_bank(2, bank)
         @codemasters_ram_enabled = (value & 0x80) != 0
-      elsif addr == 0x8000
-        set_bank(3, bank)
       elsif @codemasters_ram_enabled && addr >= 0xA000 && addr <= 0xBFFF
         @cart_ram[addr & 0x1FFF] = value
+      elsif addr <= 0xBFFF
+        set_bank(3, bank)
       end
     end
 
@@ -199,7 +203,7 @@ module SmsEmulator
         set_bank(1, bank)
       elsif wide ? (addr <= 0x7FFF) : addr == 0x4000
         set_bank(2, bank)
-      elsif addr >= 0xA000 && addr <= 0xBFFF
+      elsif wide ? (addr >= 0xA000 && addr <= 0xBFFF) : addr == 0xA000
         if @codemasters_ram_enabled
           @cart_ram[addr & 0x1FFF] = value
         else
@@ -304,8 +308,12 @@ module SmsEmulator
 
     def looks_like_codemasters_mapper?(bytes)
       counts = mapper_write_counts(bytes)
-      triplet = counts[0x0000] >= 2 && counts[0x4000] >= 2 && counts[0x8000] >= 2
-      triplet || (counts[0xA000] >= 8 && counts[0x8000] >= 2)
+      looks_like_codemasters_triplet?(bytes) || (counts[0xA000] >= 8 && counts[0x8000] >= 2)
+    end
+
+    def looks_like_codemasters_triplet?(bytes)
+      counts = mapper_write_counts(bytes)
+      counts[0x0000] >= 2 && counts[0x4000] >= 2 && counts[0x8000] >= 2
     end
 
     def looks_like_sega_mapper?(bytes)

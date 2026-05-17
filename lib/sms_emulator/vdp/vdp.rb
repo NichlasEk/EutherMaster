@@ -5,7 +5,7 @@ module SmsEmulator
     SMS_HEIGHT_EXTENDED = 224  # Some modes
 
     # VDP registers
-    NUM_REGISTERS = 11
+    NUM_REGISTERS = 16
 
     attr_reader :registers, :vram, :cram, :framebuffer, :render_version
     attr_accessor :irq_line
@@ -94,6 +94,7 @@ module SmsEmulator
             @video_dirty = true if @registers[reg_num] != @latched_control_byte
             @registers[reg_num] = @latched_control_byte
           end
+          @code_register = 0
           @addr_latch = (latched | ((value & 0x3F) << 8)) & 0x3FFF
         else
           @addr_latch = (latched | ((value & 0x3F) << 8)) & 0x3FFF
@@ -131,7 +132,9 @@ module SmsEmulator
     end
 
     def increment_address
-      @addr_latch = (@addr_latch + 1) & 0x3FFF
+      increment = @registers[15] || 0
+      increment = 1 if increment.zero?
+      @addr_latch = (@addr_latch + increment) & 0x3FFF
     end
 
     # Render one scanline
@@ -157,7 +160,7 @@ module SmsEmulator
 
     def render_background_scanline(scanline)
       name_base = ((@registers[2] & 0x0F) << 10) & 0xF800
-      name_mask = 0xFBFF | ((@registers[2] & 0x01) << 10)
+      name_mask = 0x3FFF
       x_scroll = horizontal_scroll_locked?(scanline) ? 0 : ((@registers[8] || 0) & 0xFF)
       coarse_x = x_scroll >> 3
       fine_x = x_scroll & 7

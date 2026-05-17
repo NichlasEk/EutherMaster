@@ -5,6 +5,7 @@ require_relative '../lib/astral_verse'
 rom_path = ARGV[0] || AstralVerse::LastRelicCache.last_relic
 frames = (ARGV[1] || 180).to_i
 hotspots = ARGV.include?('--hotspots')
+opcodes = ARGV.include?('--opcodes')
 
 abort "Usage: #{$PROGRAM_NAME} ROM_PATH [frames]" unless rom_path && File.exist?(rom_path)
 
@@ -25,6 +26,8 @@ if hotspots
   end
   cpu.pc_hits = pc_hits
 end
+
+stone.emulator.cpu.enable_opcode_counts! if opcodes
 
 started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 frames.times { stone.gaze_frame }
@@ -48,4 +51,31 @@ if hotspots
   pc_hits.sort_by { |_pc, count| -count }.first(20).each do |pc, count|
     puts "  %04X  %d" % [pc, count]
   end
+end
+
+if opcodes
+  puts "Opcode hotspots:"
+  stone.emulator.cpu.opcode_counts.each_with_index
+    .select { |count, _opcode| count.positive? }
+    .sort_by { |count, _opcode| -count }
+    .first(30)
+    .each do |count, opcode|
+      puts "  %02X  %d" % [opcode, count]
+    end
+  puts "CB opcode hotspots:"
+  stone.emulator.cpu.cb_opcode_counts.each_with_index
+    .select { |count, _opcode| count.positive? }
+    .sort_by { |count, _opcode| -count }
+    .first(20)
+    .each do |count, opcode|
+      puts "  CB %02X  %d" % [opcode, count]
+    end
+  puts "ED opcode hotspots:"
+  stone.emulator.cpu.ed_opcode_counts.each_with_index
+    .select { |count, _opcode| count.positive? }
+    .sort_by { |count, _opcode| -count }
+    .first(20)
+    .each do |count, opcode|
+      puts "  ED %02X  %d" % [opcode, count]
+    end
 end

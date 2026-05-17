@@ -153,12 +153,18 @@ module SmsEmulator
 
         if @fast_idle_enabled
           while cycles_this_frame < target_cycles
+            if @vdp.irq_line && @cpu.iff1
+              cycles_this_frame += @cpu.interrupt
+              steps_this_frame += 1
+              next
+            end
+
             @memory.io_cycle = cycles_this_frame
             cycles = @cpu.fast_forward_idle_loop(target_cycles - cycles_this_frame)
-            cycles = @cpu.step if cycles <= 0
+            cycles = @cpu.run_cycles(target_cycles - cycles_this_frame) if cycles <= 0
             cycles = 4 if cycles <= 0
             cycles_this_frame += cycles
-            steps_this_frame += 1
+            steps_this_frame += @cpu.last_run_steps || 1
 
             if @vdp.irq_line && @cpu.iff1
               cycles_this_frame += @cpu.interrupt
@@ -166,11 +172,17 @@ module SmsEmulator
           end
         else
           while cycles_this_frame < target_cycles
+            if @vdp.irq_line && @cpu.iff1
+              cycles_this_frame += @cpu.interrupt
+              steps_this_frame += 1
+              next
+            end
+
             @memory.io_cycle = cycles_this_frame
-            cycles = @cpu.step
+            cycles = @cpu.run_cycles(target_cycles - cycles_this_frame)
             cycles = 4 if cycles <= 0
             cycles_this_frame += cycles
-            steps_this_frame += 1
+            steps_this_frame += @cpu.last_run_steps || 1
 
             if @vdp.irq_line && @cpu.iff1
               cycles_this_frame += @cpu.interrupt

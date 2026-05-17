@@ -323,7 +323,8 @@ module AstralVerse
       return if @frame_image && @framebuffer_signature == signature
 
       rgba = String.new(capacity: VisionSprite::POOL_WIDTH * VisionSprite::POOL_HEIGHT * 4, encoding: Encoding::BINARY)
-      framebuffer.each do |value|
+      pixel_count = VisionSprite::POOL_WIDTH * VisionSprite::POOL_HEIGHT
+      framebuffer.first(pixel_count).each do |value|
         rgba << @sms_palette_rgba[(value || 0) & 0x3F]
       end
       @frame_image = Gosu::Image.from_blob(VisionSprite::POOL_WIDTH, VisionSprite::POOL_HEIGHT, rgba)
