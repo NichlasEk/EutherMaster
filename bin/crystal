@@ -43,8 +43,7 @@ loop do
       puts "📂 Opening Relic Explorer..."
 
       require_relative '../lib/astral_verse/ui/file_browser'
-      last = AstralVerse::LastRelicCache.last_relic
-      browser = AstralVerse::UI::FileBrowser.new(last ? File.dirname(last) : Dir.home)
+      browser = AstralVerse::UI::FileBrowser.new(AstralVerse::LastRelicCache.last_dir)
       browser.show
 
       if browser.selected_path

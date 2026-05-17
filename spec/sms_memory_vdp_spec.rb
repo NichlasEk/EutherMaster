@@ -15,17 +15,19 @@ RSpec.describe SmsEmulator::Memory do
   end
 
   it 'mirrors mapper registers into RAM so games can save and restore banks' do
-    memory = described_class.new
-    memory.load_rom(Array.new(0xC000, 0))
+    with_forced_sms_mapper('sega') do
+      memory = described_class.new
+      memory.load_rom(Array.new(0xC000, 0))
 
-    expect(memory.read_byte(0xFFFC)).to eq(0)
-    expect(memory.read_byte(0xFFFD)).to eq(0)
-    expect(memory.read_byte(0xFFFE)).to eq(1)
-    expect(memory.read_byte(0xFFFF)).to eq(2)
+      expect(memory.read_byte(0xFFFC)).to eq(0)
+      expect(memory.read_byte(0xFFFD)).to eq(0)
+      expect(memory.read_byte(0xFFFE)).to eq(1)
+      expect(memory.read_byte(0xFFFF)).to eq(2)
 
-    memory.write_byte(0xFFFF, 0x82)
+      memory.write_byte(0xFFFF, 0x82)
 
-    expect(memory.read_byte(0xFFFF)).to eq(0x82)
+      expect(memory.read_byte(0xFFFF)).to eq(0x82)
+    end
   end
 
   it 'strips 512-byte copier headers from cartridge images' do
@@ -39,6 +41,77 @@ RSpec.describe SmsEmulator::Memory do
     expect(memory.cartridge.length).to eq(0x8000)
     expect(memory.read_byte(0)).to eq(0xED)
     expect(memory.read_byte(1)).to eq(0x56)
+  end
+
+  it 'maps Codemasters cartridges through writes at 0000/4000/8000' do
+    with_forced_sms_mapper('codemasters') do
+      data = Array.new(0x10000, 0)
+      data[0x0000] = 0x10
+      data[0x4000] = 0x20
+      data[0x8000] = 0x30
+      data[0xC000] = 0x40
+
+      memory = described_class.new
+      memory.load_rom(data)
+
+      expect(memory.mapper_type).to eq(:codemasters)
+      expect(memory.read_byte(0x8000)).to eq(0x10)
+
+      memory.write_byte(0x8000, 3)
+      expect(memory.read_byte(0x8000)).to eq(0x40)
+
+      memory.write_byte(0x0000, 2)
+      expect(memory.read_byte(0x0000)).to eq(0x30)
+    end
+  end
+
+  it 'maps Korean A000 cartridges by switching slot 2 on A000-BFFF writes' do
+    with_forced_sms_mapper('korean_a000') do
+      data = Array.new(0x10000, 0)
+      data[0x8000] = 0x30
+      data[0xC000] = 0x40
+
+      memory = described_class.new
+      memory.load_rom(data)
+
+      expect(memory.read_byte(0x8000)).to eq(0x30)
+      memory.write_byte(0xA000, 3)
+      expect(memory.read_byte(0x8000)).to eq(0x40)
+    end
+  end
+
+  it 'maps Korean 6000 RAM cartridges with RAM at 6000-7FFF' do
+    with_forced_sms_mapper('korean_6000_ram') do
+      memory = described_class.new
+      memory.load_rom(Array.new(0x10000, 0))
+
+      memory.write_byte(0x6000, 0x5A)
+
+      expect(memory.read_byte(0x6000)).to eq(0x5A)
+    end
+  end
+
+  it 'detects headerless Codemasters mapper patterns' do
+    data = Array.new(0x10000, 0)
+    [[0x0000, 2], [0x4000, 2], [0x8000, 2]].each_with_index do |(addr, count), group|
+      count.times do |index|
+        offset = 0x0100 + group * 0x10 + index * 3
+        data[offset, 3] = [0x32, addr & 0xFF, addr >> 8]
+      end
+    end
+
+    memory = described_class.new
+    memory.load_rom(data)
+
+    expect(memory.mapper_type).to eq(:codemasters)
+  end
+
+  def with_forced_sms_mapper(mapper)
+    old = ENV['EUTHERDRIVE_SMS_FORCE_MAPPER']
+    ENV['EUTHERDRIVE_SMS_FORCE_MAPPER'] = mapper
+    yield
+  ensure
+    ENV['EUTHERDRIVE_SMS_FORCE_MAPPER'] = old
   end
 
   it 'routes VDP ports through the memory bus' do

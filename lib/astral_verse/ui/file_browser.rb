@@ -1,4 +1,5 @@
 require 'gosu'
+require_relative '../last_relic_cache'
 
 module AstralVerse
   module UI
@@ -11,6 +12,7 @@ module AstralVerse
       MARGIN = 40
       SIDEBAR_WIDTH = 280
       FULLSCREEN_BUTTON = { w: 110, h: 32, margin: 18 }.freeze
+      ROM_DIR_BUTTON = { w: 120, h: 32, gap: 12 }.freeze
 
       ROM_EXTENSIONS = ['.sms', '.gg', '.bin', '.rom'].freeze
 
@@ -45,6 +47,8 @@ module AstralVerse
         @closing = false
         @show_hidden = false
         @fullscreen_shortcut_down = false
+        @rom_dir_status = nil
+        @rom_dir_status_until = 0
 
         # Scrolling state
         @scroll_dragging = false
@@ -70,6 +74,7 @@ module AstralVerse
           'Downloads' => File.join(Dir.home, 'Downloads'),
           'Project' => File.expand_path('.'),
         }
+        refresh_rom_dir_bookmark
       end
 
       def scan_directory(dir)
@@ -223,23 +228,51 @@ module AstralVerse
         # Current path
         path_display = @current_dir.length > 70 ? "..." + @current_dir[-67..-1] : @current_dir
         @font_path.draw_text("📂 #{path_display}", sidebar_width + 25, 72, 1, 1, 1, COLORS[:dim_text])
+        draw_rom_dir_button
         draw_fullscreen_button
+        draw_rom_dir_status
 
         Gosu.draw_rect(sidebar_width, HEADER_HEIGHT - 2, window_width - sidebar_width, 2, COLORS[:border])
+      end
+
+      def draw_rom_dir_button
+        button = rom_dir_button_rect
+        label = "ROM Dir"
+        mx, my = pointer_position
+        hover = point_in_rect?(mx, my, button)
+        saved_here = File.expand_path(@current_dir) == LastRelicCache.rom_dir
+        color = if hover
+          COLORS[:highlight]
+        elsif saved_here
+          Gosu::Color.new(255, 45, 85, 55)
+        else
+          Gosu::Color.new(255, 50, 40, 85)
+        end
+
+        Gosu.draw_rect(button[:x], button[:y], button[:w], button[:h], color)
+        Gosu.draw_rect(button[:x], button[:y], button[:w], 1, COLORS[:border])
+        text_x = button[:x] + (button[:w] - @font_small.text_width(label)) / 2
+        @font_small.draw_text(label, text_x, button[:y] + 6, 2, 1, 1, COLORS[:text])
       end
 
       def draw_fullscreen_button
         button = fullscreen_button_rect
         label = fullscreen? ? "⛶ Window" : "⛶ Full"
         mx, my = pointer_position
-        hover = mx >= button[:x] && mx <= button[:x] + button[:w] &&
-                my >= button[:y] && my <= button[:y] + button[:h]
+        hover = point_in_rect?(mx, my, button)
         color = hover ? COLORS[:highlight] : Gosu::Color.new(255, 50, 40, 85)
 
         Gosu.draw_rect(button[:x], button[:y], button[:w], button[:h], color)
         Gosu.draw_rect(button[:x], button[:y], button[:w], 1, COLORS[:border])
         text_x = button[:x] + (button[:w] - @font_small.text_width(label)) / 2
         @font_small.draw_text(label, text_x, button[:y] + 6, 2, 1, 1, COLORS[:text])
+      end
+
+      def draw_rom_dir_status
+        return unless @rom_dir_status && Gosu.milliseconds < @rom_dir_status_until
+
+        x = rom_dir_button_rect[:x]
+        @font_small.draw_text(@rom_dir_status, x, 54, 2, 1, 1, COLORS[:file_rom])
       end
 
       def draw_file_list
@@ -378,6 +411,10 @@ module AstralVerse
           mx, my = pointer_position
           if hit_fullscreen_button?(mx, my)
             toggle_fullscreen
+            return
+          end
+          if hit_rom_dir_button?(mx, my)
+            save_current_rom_dir
             return
           end
 
@@ -563,6 +600,22 @@ module AstralVerse
         @scroll = 0
       end
 
+      def save_current_rom_dir
+        if LastRelicCache.save_rom_dir(@current_dir)
+          refresh_rom_dir_bookmark
+          @rom_dir_status = "Saved"
+        else
+          @rom_dir_status = "Save failed"
+        end
+        @rom_dir_status_until = Gosu.milliseconds + 1800
+      end
+
+      def refresh_rom_dir_bookmark
+        @bookmarks.delete('ROM Dir')
+        rom_dir = LastRelicCache.rom_dir
+        @bookmarks = { 'ROM Dir' => rom_dir }.merge(@bookmarks) if rom_dir
+      end
+
       def max_scroll_index
         [@entries.length - @visible_count, 0].max
       end
@@ -616,10 +669,27 @@ module AstralVerse
         }
       end
 
+      def rom_dir_button_rect
+        fullscreen = fullscreen_button_rect
+        {
+          x: fullscreen[:x] - ROM_DIR_BUTTON[:gap] - ROM_DIR_BUTTON[:w],
+          y: fullscreen[:y],
+          w: ROM_DIR_BUTTON[:w],
+          h: ROM_DIR_BUTTON[:h]
+        }
+      end
+
       def hit_fullscreen_button?(mx, my)
-        button = fullscreen_button_rect
-        mx >= button[:x] && mx <= button[:x] + button[:w] &&
-          my >= button[:y] && my <= button[:y] + button[:h]
+        point_in_rect?(mx, my, fullscreen_button_rect)
+      end
+
+      def hit_rom_dir_button?(mx, my)
+        point_in_rect?(mx, my, rom_dir_button_rect)
+      end
+
+      def point_in_rect?(x, y, rect)
+        x >= rect[:x] && x <= rect[:x] + rect[:w] &&
+          y >= rect[:y] && y <= rect[:y] + rect[:h]
       end
 
       def toggle_fullscreen
