@@ -96,4 +96,23 @@ RSpec.describe 'Mega Drive audio' do
     expect(vdp.cram.all?(&:zero?)).to be(true)
     expect(vdp.framebuffer.any? { |pixel| pixel != 0 }).to be(true)
   end
+
+  it 'performs memory-to-CRAM DMA through the VDP control port' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+    bus.write_word(0x200, 0x000E)
+    bus.write_word(0x202, 0x00E0)
+
+    bus.write_word(0xC00004, 0x8114) # DMA enable
+    bus.write_word(0xC00004, 0x9312) # length low
+    bus.write_word(0xC00004, 0x9400) # length high
+    bus.write_word(0xC00004, 0x9500) # source bits 9-1
+    bus.write_word(0xC00004, 0x9601) # source bits 16-9
+    bus.write_word(0xC00004, 0x9700) # memory-to-VRAM/CRAM
+    bus.write_word(0xC00004, 0xC000) # CRAM write address 0
+    bus.write_word(0xC00004, 0x0080) # DMA start
+
+    expect(vdp.cram[0]).to eq(0x000E)
+    expect(vdp.cram[1]).to eq(0x00E0)
+  end
 end

@@ -135,6 +135,20 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_c?).to be true
   end
 
+  it 'does not consume absolute destination extensions twice for quick memory ops' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x52B8, 0xFE0C, # ADDQ.L #1,$FE0C
+      0x4E71
+    ])
+    bus.write_long(0xFFFF_FE0C, 0x41)
+
+    cpu.step
+
+    expect(bus.read_long(0xFFFF_FE0C)).to eq(0x42)
+    expect(cpu.pc).to eq(0x104)
+  end
+
   it 'tests memory values without changing X' do
     reset_to(0x100)
     load_program(0x100, [
@@ -179,6 +193,20 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.d[6]).to eq(0x1111)
     expect(cpu.d[7]).to eq(0xFFFF_FFFE)
     expect(cpu.a[0]).to eq(0x204)
+  end
+
+  it 'sign-extends data registers without colliding with MOVEM' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x70FF, # MOVEQ #-1,D0
+      0x4880, # EXT.W D0
+      0x48C0  # EXT.L D0
+    ])
+
+    3.times { cpu.step }
+
+    expect(cpu.d[0]).to eq(0xFFFF_FFFF)
+    expect(cpu.flag_n?).to be true
   end
 
   it 'executes immediate logical and compare operations' do

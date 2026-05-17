@@ -20,6 +20,7 @@ module MegaDrive
       @psg = psg
       @ym2612 = ym2612
       @vdp = vdp
+      @vdp.bus = self if @vdp
       @z80_bus_requested = false
       @z80_reset_asserted = true
     end

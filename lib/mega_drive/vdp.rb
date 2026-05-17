@@ -8,7 +8,7 @@ module MegaDrive
     NUM_REGISTERS = 0x20
 
     attr_reader :registers, :vram, :cram, :vsram, :framebuffer, :render_version
-    attr_accessor :irq_level
+    attr_accessor :irq_level, :bus
 
     def initialize
       @registers = Array.new(NUM_REGISTERS, 0)
@@ -19,7 +19,9 @@ module MegaDrive
       @control_pending = false
       @control_latch = 0
       @address = 0
-      @code = 0
+      @mode_write = false
+      @location_bits = 0
+      @dma_active = false
       @status = 0x3400
       @irq_level = 0
       @render_version = 0
@@ -35,7 +37,9 @@ module MegaDrive
       @control_pending = false
       @control_latch = 0
       @address = 0
-      @code = 0
+      @mode_write = false
+      @location_bits = 0
+      @dma_active = false
       @status = 0x3400
       @irq_level = 0
       @render_version = 0
@@ -86,13 +90,16 @@ module MegaDrive
       end
 
       if @control_pending
-        @address = (@control_latch & 0x3FFF) | ((value & 0x0003) << 14)
-        @code = ((@control_latch >> 14) & 0x03) | ((value >> 2) & 0x3C)
+        @address = (@control_latch & 0x3FFF) | ((value & 0x0007) << 14)
+        @location_bits = (@location_bits & 0x01) | ((value >> 3) & 0x06)
+        @dma_active = dma_enabled? && (value & 0x0080) != 0
         @control_pending = false
+        perform_dma if @dma_active
       else
         @control_latch = value
-        @address = (@address & 0xC000) | (value & 0x3FFF)
-        @code = (@code & 0x3C) | ((value >> 14) & 0x03)
+        @address = (@address & 0x1C000) | (value & 0x3FFF)
+        @mode_write = (value & 0x4000) != 0
+        @location_bits = (@location_bits & 0x06) | ((value >> 15) & 0x01)
         @control_pending = true
       end
     end
@@ -114,11 +121,42 @@ module MegaDrive
     private
 
     def memory_target
-      case @code
-      when 0x03 then :cram
-      when 0x05 then :vsram
-      else :vram
+      case @location_bits
+      when 0x00 then :vram
+      when 0x01 then @mode_write ? :cram : :invalid
+      when 0x02 then :vsram
+      else :invalid
       end
+    end
+
+    def dma_enabled?
+      (@registers[1] & 0x10) != 0
+    end
+
+    def dma_length
+      length = ((@registers[20] << 8) | @registers[19]) & 0xFFFF
+      length.zero? ? 0x1_0000 : length
+    end
+
+    def dma_source_address
+      source = (@registers[21] << 1) | (@registers[22] << 9) | ((@registers[23] & 0x3F) << 17)
+      source |= 0x80_0000 if (@registers[23] & 0x40) != 0
+      source & 0xFF_FFFE
+    end
+
+    def dma_mode
+      @registers[23] & 0xC0
+    end
+
+    def perform_dma
+      return unless @bus && dma_mode < 0x80
+
+      source = dma_source_address
+      dma_length.times do
+        write_data(@bus.read_word(source))
+        source = (source + 2) & 0xFF_FFFE
+      end
+      @dma_active = false
     end
 
     def read_vram_word(address)
@@ -147,19 +185,19 @@ module MegaDrive
       @framebuffer.fill(backdrop)
       drew = false
 
-      drew |= draw_plane(plane_b_base)
-      drew |= draw_plane(plane_a_base)
+      h_scroll_a, h_scroll_b, v_scroll_a, v_scroll_b = scroll_values
+      drew |= draw_plane(plane_b_base, h_scroll_b, v_scroll_b)
+      drew |= draw_plane(plane_a_base, h_scroll_a, v_scroll_a)
       draw_vram_activity_frame unless drew
 
       @video_dirty = false
       @render_version += 1
     end
 
-    def draw_plane(nametable_base)
+    def draw_plane(nametable_base, h_scroll, v_scroll)
       return false if nametable_base.zero?
 
       width_cells, height_cells = plane_dimensions
-      h_scroll, v_scroll = scroll_values
       drew = false
 
       SMS_HEIGHT.times do |screen_y|
@@ -167,7 +205,7 @@ module MegaDrive
         cell_y = scrolled_y / 8
         row_in_tile = scrolled_y & 7
         SMS_WIDTH.times do |screen_x|
-          scrolled_x = (screen_x + h_scroll) % (width_cells * 8)
+          scrolled_x = (screen_x - h_scroll) % (width_cells * 8)
           cell_x = scrolled_x / 8
           column_in_tile = scrolled_x & 7
           entry = read_vram_word(nametable_base + ((cell_y * width_cells + cell_x) * 2))
@@ -228,8 +266,10 @@ module MegaDrive
     def scroll_values
       hscroll_base = (@registers[13] & 0x3F) << 10
       h_scroll_a = read_vram_word(hscroll_base) & 0x03FF
-      v_scroll_a = @vsram[0] & 0x03FF
-      [h_scroll_a, v_scroll_a]
+      h_scroll_b = read_vram_word(hscroll_base + 2) & 0x03FF
+      v_scroll_a = (@vsram[0] || 0) & 0x03FF
+      v_scroll_b = (@vsram[1] || 0) & 0x03FF
+      [h_scroll_a, h_scroll_b, v_scroll_a, v_scroll_b]
     end
 
     def plane_a_base

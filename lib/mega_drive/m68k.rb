@@ -132,6 +132,7 @@ module MegaDrive
         return dbcc(opcode) if (opcode & 0xF0F8) == 0x50C8
         return addq_subq(opcode) if (opcode & 0xF000) == 0x5000 && ((opcode >> 6) & 0x03) != 0x03
         return tst(opcode) if (opcode & 0xFF00) == 0x4A00
+        return ext(opcode) if (opcode & 0xFFB8) == 0x4880
         return movem(opcode) if (opcode & 0xFB80) == 0x4880 || (opcode & 0xFB80) == 0x4C80
         return lea(opcode) if (opcode & 0xF1C0) == 0x41C0
         return jump_or_jsr(opcode) if (opcode & 0xFF80) == 0x4E80 || (opcode & 0xFF80) == 0x4EC0
@@ -447,9 +448,16 @@ module MegaDrive
       size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
       mode = (opcode >> 3) & 0x07
       reg = opcode & 0x07
-      old = read_ea(mode, reg, mode == 1 ? SIZE_LONG : size)
+      ea_size = mode == 1 ? SIZE_LONG : size
+      if mode == 0 || mode == 1
+        old = read_ea(mode, reg, ea_size)
+        address = nil
+      else
+        address = effective_address(mode, reg, ea_size)
+        old = read_sized(address, ea_size)
+      end
       result = subtract ? old - value : old + value
-      write_ea(mode, reg, mode == 1 ? SIZE_LONG : size, result)
+      address ? write_sized(address, ea_size, result) : write_ea(mode, reg, ea_size, result)
       set_add_sub_flags(old, value, result, size, subtract: subtract) unless mode == 1
       finish(mode == 0 || mode == 1 ? 4 : 8)
     end
@@ -463,6 +471,18 @@ module MegaDrive
       value = read_ea(mode, reg, size)
       set_nz_flags(value, size, keep_x: true)
       finish(mode == 0 ? 4 : 8)
+    end
+
+    def ext(opcode)
+      reg = opcode & 0x07
+      if (opcode & 0x0040).zero?
+        @d[reg] = (@d[reg] & 0xFFFF_0000) | (sign_extend(@d[reg] & 0xFF, 8) & 0xFFFF)
+        set_nz_flags(@d[reg], SIZE_WORD, keep_x: true)
+      else
+        @d[reg] = sign_extend(@d[reg] & 0xFFFF, 16) & 0xFFFF_FFFF
+        set_nz_flags(@d[reg], SIZE_LONG, keep_x: true)
+      end
+      finish(4)
     end
 
     def movem(opcode)
