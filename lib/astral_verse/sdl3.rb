@@ -6,6 +6,7 @@ module AstralVerse
     ffi_lib 'SDL3'
 
     INIT_VIDEO = 0x00000020
+    INIT_AUDIO = 0x00000010
     INIT_EVENTS = 0x00004000
 
     WINDOW_FULLSCREEN = 0x0000000000000001
@@ -16,6 +17,8 @@ module AstralVerse
     TEXTUREACCESS_STREAMING = 1
     SCALEMODE_NEAREST = 0
     RENDERER_VSYNC_DISABLED = 0
+    AUDIO_S16 = 0x8010
+    AUDIO_DEVICE_DEFAULT_PLAYBACK = 0xFFFFFFFF
 
     EVENT_QUIT = 0x100
     EVENT_KEY_DOWN = 0x300
@@ -54,6 +57,12 @@ module AstralVerse
         :g, :uint8,
         :b, :uint8,
         :a, :uint8
+    end
+
+    class AudioSpec < FFI::Struct
+      layout :format, :uint32,
+        :channels, :int,
+        :freq, :int
     end
 
     class Surface < FFI::Struct
@@ -98,6 +107,13 @@ module AstralVerse
     attach_function :poll_event, :SDL_PollEvent, [:pointer], :bool
     attach_function :hide_cursor, :SDL_HideCursor, [], :bool
     attach_function :show_cursor, :SDL_ShowCursor, [], :bool
+
+    attach_function :open_audio_device_stream, :SDL_OpenAudioDeviceStream, [:uint32, AudioSpec.by_ref, :pointer, :pointer], :pointer
+    attach_function :resume_audio_stream_device, :SDL_ResumeAudioStreamDevice, [:pointer], :bool
+    attach_function :destroy_audio_stream, :SDL_DestroyAudioStream, [:pointer], :void
+    attach_function :put_audio_stream_data, :SDL_PutAudioStreamData, [:pointer, :pointer, :int], :bool
+    attach_function :get_audio_stream_queued, :SDL_GetAudioStreamQueued, [:pointer], :int
+    attach_function :clear_audio_stream, :SDL_ClearAudioStream, [:pointer], :bool
 
     def self.check(pointer_or_bool, label)
       ok = pointer_or_bool.is_a?(FFI::Pointer) ? !pointer_or_bool.null? : pointer_or_bool

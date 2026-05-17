@@ -57,11 +57,12 @@ module AstralVerse
         @keys = {}
         @frame_count = 0
         @last_vision = now_ms
+        @next_draw = 0.0
         @frame_rgba = String.new(capacity: SMS_W * SMS_H * 4, encoding: Encoding::BINARY)
         @palette_rgba = Array.new(64) do |value|
           [((value >> 0) & 0x03) * 85, ((value >> 2) & 0x03) * 85, ((value >> 4) & 0x03) * 85, 255].pack('C4')
         end
-        @audio_player = PsgPlayer.new(@stone.emulator.psg)
+        @audio_player = nil
         @fullscreen = false
         @mouse_visible_until = 0
         @last_mouse = [0.0, 0.0]
@@ -75,6 +76,7 @@ module AstralVerse
 
       def show
         init_sdl
+        @audio_player = PsgPlayer.new(@stone.emulator.psg)
         open_window
         loop_once while !@closing
       ensure
@@ -87,7 +89,7 @@ module AstralVerse
       private
 
       def init_sdl
-        SDL3.check(SDL3.init(SDL3::INIT_VIDEO | SDL3::INIT_EVENTS), 'SDL_Init')
+        SDL3.check(SDL3.init(SDL3::INIT_VIDEO | SDL3::INIT_AUDIO | SDL3::INIT_EVENTS), 'SDL_Init')
         @sdl_ready = true
         SDL3.check(SDL3TTF.init, 'TTF_Init')
         @ttf_ready = true
@@ -118,8 +120,13 @@ module AstralVerse
       def loop_once
         poll_events
         update_game if @mode == :game
-        draw
-        SDL3.delay(1)
+        now = now_ms
+        if now >= @next_draw
+          draw
+          @next_draw = now + FRAME_MS
+        end
+        sleep_ms = [[@next_draw - now, 1.0].min, 0.0].max
+        SDL3.delay(sleep_ms.ceil)
       end
 
       def poll_events

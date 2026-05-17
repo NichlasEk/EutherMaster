@@ -1,5 +1,6 @@
 require 'tmpdir'
 require 'fileutils'
+require_relative '../sdl3'
 
 module AstralVerse
   class PsgPlayer
@@ -14,9 +15,10 @@ module AstralVerse
 
     def initialize(psg)
       @psg = psg
-      @mode = ENV.fetch('ASTRAL_PSG_MODE', 'pipe')
+      @mode = ENV.fetch('ASTRAL_PSG_MODE', 'sdl')
+      @sink = SdlSink.new(SAMPLE_RATE) if @mode == 'sdl'
       @sink = PcmSink.new(SAMPLE_RATE) if @mode == 'pipe'
-      raise 'Only pipe PSG audio is supported in the SDL3 backend' unless @sink
+      raise 'Only sdl and pipe PSG audio modes are supported' unless @sink
       @channels = Array.new(4)
       @chunk_index = 0
       @dc_previous_input = 0.0
@@ -247,6 +249,56 @@ module AstralVerse
           path = File.join(dir, name)
           File.file?(path) && File.executable?(path)
         end
+      end
+    end
+
+    class SdlSink
+      BYTES_PER_SAMPLE = 2
+      PREBUFFER_MS = ENV.fetch('ASTRAL_SDL_AUDIO_PREBUFFER_MS', '90').to_i.clamp(20, 250)
+      MAX_QUEUE_MS = ENV.fetch('ASTRAL_SDL_AUDIO_MAX_QUEUE_MS', '220').to_i.clamp(80, 600)
+
+      def initialize(sample_rate)
+        @sample_rate = sample_rate
+        @stream = open_stream
+        @closed = false
+        prebuffer_silence
+        SDL3.check(SDL3.resume_audio_stream_device(@stream), 'SDL_ResumeAudioStreamDevice')
+      end
+
+      def write_samples(samples, gain)
+        raise IOError, 'SDL audio stream closed' if @closed
+
+        queued = SDL3.get_audio_stream_queued(@stream)
+        SDL3.clear_audio_stream(@stream) if queued > max_queue_bytes
+        data = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }.pack('s<*')
+        SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData')
+      end
+
+      def close
+        return if @closed
+
+        @closed = true
+        SDL3.destroy_audio_stream(@stream) if @stream && !@stream.null?
+      end
+
+      private
+
+      def open_stream
+        spec = SDL3::AudioSpec.new
+        spec[:format] = SDL3::AUDIO_S16
+        spec[:channels] = 1
+        spec[:freq] = @sample_rate
+        SDL3.check(SDL3.open_audio_device_stream(SDL3::AUDIO_DEVICE_DEFAULT_PLAYBACK, spec, nil, nil), 'SDL_OpenAudioDeviceStream')
+      end
+
+      def prebuffer_silence
+        samples = (@sample_rate * PREBUFFER_MS / 1000.0).round
+        data = Array.new(samples, 0).pack('s<*')
+        SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData prebuffer')
+      end
+
+      def max_queue_bytes
+        (@sample_rate * MAX_QUEUE_MS / 1000.0).round * BYTES_PER_SAMPLE
       end
     end
   end
