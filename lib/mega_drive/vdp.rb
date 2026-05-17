@@ -98,7 +98,7 @@ module MegaDrive
     end
 
     def render_frame
-      draw_activity_frame if @video_dirty
+      draw_scroll_planes if @video_dirty
     end
 
     def request_vblank!
@@ -142,30 +142,44 @@ module MegaDrive
       @address = (@address + increment) & 0xFFFF
     end
 
-    def draw_activity_frame
-      bg = md_color_to_sms_index(@cram[0] || 0)
-      @framebuffer.fill(bg)
+    def draw_scroll_planes
+      backdrop = color_index(@registers[7] & 0x3F)
+      @framebuffer.fill(backdrop)
+      drew = false
 
-      if @cram.all?(&:zero?)
-        draw_vram_activity_frame
-        @video_dirty = false
-        @render_version += 1
-        return
-      end
-
-      y = 16
-      CRAM_SIZE.times do |index|
-        color = md_color_to_sms_index(@cram[index] || 0)
-        x0 = (index % 16) * 16
-        y0 = y + (index / 16) * 16
-        12.times do |dy|
-          row = (y0 + dy) * SMS_WIDTH + x0
-          12.times { |dx| @framebuffer[row + dx] = color }
-        end
-      end
+      drew |= draw_plane(plane_b_base)
+      drew |= draw_plane(plane_a_base)
+      draw_vram_activity_frame unless drew
 
       @video_dirty = false
       @render_version += 1
+    end
+
+    def draw_plane(nametable_base)
+      return false if nametable_base.zero?
+
+      width_cells, height_cells = plane_dimensions
+      h_scroll, v_scroll = scroll_values
+      drew = false
+
+      SMS_HEIGHT.times do |screen_y|
+        scrolled_y = (screen_y + v_scroll) % (height_cells * 8)
+        cell_y = scrolled_y / 8
+        row_in_tile = scrolled_y & 7
+        SMS_WIDTH.times do |screen_x|
+          scrolled_x = (screen_x + h_scroll) % (width_cells * 8)
+          cell_x = scrolled_x / 8
+          column_in_tile = scrolled_x & 7
+          entry = read_vram_word(nametable_base + ((cell_y * width_cells + cell_x) * 2))
+          pixel = tile_pixel(entry, row_in_tile, column_in_tile)
+          next if pixel.zero?
+
+          @framebuffer[screen_y * SMS_WIDTH + screen_x] = color_index(((entry >> 9) & 0x30) | pixel)
+          drew = true
+        end
+      end
+
+      drew
     end
 
     def draw_vram_activity_frame
@@ -178,8 +192,52 @@ module MegaDrive
         @framebuffer[pixel] = color
         @framebuffer[pixel + 1] = color if (pixel % SMS_WIDTH) < SMS_WIDTH - 1
         @framebuffer[pixel + SMS_WIDTH] = color if pixel + SMS_WIDTH < @framebuffer.length
-        index += 1
       end
+    end
+
+    def tile_pixel(entry, row, column)
+      pattern = entry & 0x07FF
+      row = 7 - row if (entry & 0x1000) != 0
+      column = 7 - column if (entry & 0x0800) != 0
+      address = (pattern * 32 + row * 4 + column / 2) & 0xFFFF
+      byte = @vram[address] || 0
+      column.even? ? (byte >> 4) & 0x0F : byte & 0x0F
+    end
+
+    def color_index(cram_index)
+      cram_value = @cram[cram_index & (CRAM_SIZE - 1)] || 0
+      return md_color_to_sms_index(cram_value) unless cram_value.zero?
+
+      cram_index & 0x3F
+    end
+
+    def plane_dimensions
+      h = case @registers[16] & 0x03
+          when 1 then 64
+          when 3 then 128
+          else 32
+          end
+      v = case (@registers[16] >> 4) & 0x03
+          when 1 then 64
+          when 3 then 128
+          else 32
+          end
+      [h, v]
+    end
+
+    def scroll_values
+      hscroll_base = (@registers[13] & 0x3F) << 10
+      h_scroll_a = read_vram_word(hscroll_base) & 0x03FF
+      v_scroll_a = @vsram[0] & 0x03FF
+      [h_scroll_a, v_scroll_a]
+    end
+
+    def plane_a_base
+      (@registers[2] & 0x38) << 10
+    end
+
+    def plane_b_base
+      (@registers[4] & 0x07) << 13
     end
 
     def md_color_to_sms_index(value)

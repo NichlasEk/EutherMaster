@@ -81,11 +81,16 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.vdp.framebuffer).to equal(emulator.framebuffer)
   end
 
-  it 'shows VRAM activity before CRAM has been populated' do
+  it 'renders scroll-plane tiles before CRAM has been populated' do
     vdp = MegaDrive::VDP.new
+    vdp.write_control(0x8200 | 0x30)
+    vdp.write_control(0x8F02)
     vdp.write_control(0x4000)
     vdp.write_control(0x0000)
-    vdp.write_data(0x1234)
+    4.times { vdp.write_data(0x1111) }
+    vdp.write_control(0x4000 | 0xC000)
+    vdp.write_control(0x0000)
+    vdp.write_data(0x0000)
     vdp.render_frame
 
     expect(vdp.cram.all?(&:zero?)).to be(true)
