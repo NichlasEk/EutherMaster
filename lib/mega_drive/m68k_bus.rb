@@ -9,13 +9,19 @@ module MegaDrive
     PSG_BASE = 0x00C0_0000
     PSG_MASK = 0x00FF_FFE0
     PSG_DATA_OFFSETS = [0x11, 0x13, 0x15, 0x17].freeze
+    Z80_BUS_REQUEST = 0x00A1_1100
+    Z80_RESET = 0x00A1_1200
+    VDP_BASE = 0x00C0_0000
 
-    attr_accessor :psg, :ym2612
+    attr_accessor :psg, :ym2612, :vdp
 
-    def initialize(size: 0x0100_0000, psg: nil, ym2612: nil)
+    def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil)
       @memory = Array.new(size, 0)
       @psg = psg
       @ym2612 = ym2612
+      @vdp = vdp
+      @z80_bus_requested = false
+      @z80_reset_asserted = true
     end
 
     def load(address, bytes)
@@ -25,12 +31,17 @@ module MegaDrive
     def read_byte(address)
       address &= ADDRESS_MASK
       return @ym2612.read_register(address) if ym2612_address?(address)
+      return z80_bus_request_status if z80_bus_request_address?(address)
+      return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
 
       @memory[address] & 0xFF
     end
 
     def read_word(address)
       address &= ADDRESS_MASK
+      return @vdp.read_data if vdp_data_address?(address)
+      return @vdp.read_control if vdp_control_address?(address)
+
       ((read_byte(address) << 8) | read_byte(address + 1)) & 0xFFFF
     end
 
@@ -44,6 +55,10 @@ module MegaDrive
 
       if ym2612_address?(address)
         @ym2612.write_port(address & 0x03, value)
+      elsif z80_bus_request_address?(address)
+        @z80_bus_requested = (value & 0x01) != 0
+      elsif z80_reset_address?(address)
+        @z80_reset_asserted = (value & 0x01).zero?
       elsif psg_address?(address)
         @psg.write(value, port: address & 0x1F)
       else
@@ -53,6 +68,15 @@ module MegaDrive
 
     def write_word(address, value)
       address &= ADDRESS_MASK
+      value &= 0xFFFF
+      if vdp_data_address?(address)
+        @vdp.write_data(value)
+        return
+      elsif vdp_control_address?(address)
+        @vdp.write_control(value)
+        return
+      end
+
       write_byte(address, (value >> 8) & 0xFF)
       write_byte(address + 1, value & 0xFF)
     end
@@ -62,8 +86,10 @@ module MegaDrive
       write_word(address + 2, value & 0xFFFF)
     end
 
-    def interrupt_level = 0
-    def acknowledge_interrupt(_level); end
+    def interrupt_level = @vdp&.irq_level || 0
+    def acknowledge_interrupt(level)
+      @vdp&.acknowledge_interrupt(level)
+    end
     def reset? = false
     def halt? = false
 
@@ -75,6 +101,26 @@ module MegaDrive
 
     def psg_address?(address)
       @psg && (address & PSG_MASK) == PSG_BASE && PSG_DATA_OFFSETS.include?(address & 0x1F)
+    end
+
+    def z80_bus_request_address?(address)
+      (address & 0x00FF_FF00) == Z80_BUS_REQUEST && (address & 1).zero?
+    end
+
+    def z80_reset_address?(address)
+      (address & 0x00FF_FF00) == Z80_RESET && (address & 1).zero?
+    end
+
+    def z80_bus_request_status
+      @z80_bus_requested ? 0 : 1
+    end
+
+    def vdp_data_address?(address)
+      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x00, 0x02].include?(address & 0x1F)
+    end
+
+    def vdp_control_address?(address)
+      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x04, 0x06].include?(address & 0x1F)
     end
   end
 end

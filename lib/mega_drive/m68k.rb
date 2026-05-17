@@ -85,6 +85,8 @@ module MegaDrive
         return reset
       end
       return finish(1) if @bus.respond_to?(:halt?) && @bus.halt?
+      level = @bus.respond_to?(:interrupt_level) ? @bus.interrupt_level.to_i : 0
+      return service_interrupt(level) if level.positive? && level > @interrupt_priority_mask
       return finish(4) if @stopped
 
       opcode = fetch_word
@@ -103,13 +105,34 @@ module MegaDrive
         self.sr = fetch_word
         @stopped = true
         finish(4)
+      when 0x4E73
+        self.sr = pop_word
+        @pc = pop_long & ADDRESS_MASK
+        finish(20)
       when 0x4E75
         @pc = pop_long & ADDRESS_MASK
         finish(16)
       else
+        return bit_operation(opcode) if bit_operation?(opcode)
+        return move_from_sr(opcode) if (opcode & 0xFFC0) == 0x40C0
+        return clr(opcode) if (opcode & 0xFF00) == 0x4200
+        return not_op(opcode) if (opcode & 0xFF00) == 0x4600 && ((opcode >> 6) & 0x03) != 0x03
+        return swap(opcode) if (opcode & 0xFFF8) == 0x4840
+        return move_to_status(opcode) if (opcode & 0xFFC0) == 0x46C0 || (opcode & 0xFFC0) == 0x44C0
+        return move_usp(opcode) if (opcode & 0xFFF0) == 0x4E60
+        return immediate_operation(opcode) if immediate_operation?(opcode)
+        return add_sub(opcode, subtract: false) if (opcode & 0xF000) == 0xD000
+        return add_sub(opcode, subtract: true) if (opcode & 0xF000) == 0x9000
+        return logical_operation(opcode, :or) if (opcode & 0xF000) == 0x8000
+        return logical_operation(opcode, :and) if (opcode & 0xF000) == 0xC000
+        return cmp(opcode) if (opcode & 0xF000) == 0xB000
+        return shift_register(opcode) if (opcode & 0xF000) == 0xE000 && ((opcode >> 6) & 0x03) != 0x03
         return moveq(opcode) if (opcode & 0xF000) == 0x7000
         return branch(opcode) if (opcode & 0xF000) == 0x6000
+        return dbcc(opcode) if (opcode & 0xF0F8) == 0x50C8
         return addq_subq(opcode) if (opcode & 0xF000) == 0x5000 && ((opcode >> 6) & 0x03) != 0x03
+        return tst(opcode) if (opcode & 0xFF00) == 0x4A00
+        return movem(opcode) if (opcode & 0xFB80) == 0x4880 || (opcode & 0xFB80) == 0x4C80
         return lea(opcode) if (opcode & 0xF1C0) == 0x41C0
         return jump_or_jsr(opcode) if (opcode & 0xFF80) == 0x4E80 || (opcode & 0xFF80) == 0x4EC0
         return move(opcode) if move_opcode?(opcode)
@@ -121,6 +144,16 @@ module MegaDrive
     def move_opcode?(opcode)
       top = (opcode >> 12) & 0x0F
       top == 0x1 || top == 0x2 || top == 0x3
+    end
+
+    def immediate_operation?(opcode)
+      return false unless (opcode & 0xF000).zero?
+
+      [0x0000, 0x0200, 0x0400, 0x0600, 0x0A00, 0x0C00].include?(opcode & 0x0F00)
+    end
+
+    def bit_operation?(opcode)
+      (opcode & 0xF100) == 0x0100 || (opcode & 0xFF00) == 0x0800
     end
 
     def move(opcode)
@@ -147,6 +180,266 @@ module MegaDrive
       finish(4)
     end
 
+    def shift_register(opcode)
+      count = (opcode >> 9) & 0x07
+      count = @d[count] & 0x3F if (opcode & 0x0020) != 0
+      count = 8 if count.zero? && (opcode & 0x0020).zero?
+      left = (opcode & 0x0100) != 0
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      type = (opcode >> 3) & 0x03
+      reg = opcode & 0x07
+      value = sized_value(@d[reg], size)
+      mask = mask_for(size)
+      sign = sign_bit_for(size)
+      result = value
+      carry = false
+
+      count.times do
+        if left
+          carry = (result & sign) != 0
+          result = (result << 1) & mask
+        elsif type.zero?
+          carry = (result & 0x01) != 0
+          result = ((result >> 1) | (result & sign)) & mask
+        else
+          carry = (result & 0x01) != 0
+          result = (result >> 1) & mask
+        end
+      end
+
+      write_data_register(reg, size, result)
+      if count.zero?
+        set_nz_flags(result, size, keep_x: true)
+      else
+        @ccr = 0
+        @ccr |= FLAG_C | FLAG_X if carry
+        @ccr |= FLAG_Z if result.zero?
+        @ccr |= FLAG_N if (result & sign) != 0
+      end
+      finish(6 + (count * 2))
+    end
+
+    def bit_operation(opcode)
+      immediate = (opcode & 0xFF00) == 0x0800
+      operation = (opcode >> 6) & 0x03
+      bit_number = immediate ? fetch_word : @d[(opcode >> 9) & 0x07]
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      size = mode.zero? ? SIZE_LONG : SIZE_BYTE
+      bit = bit_number & (mode.zero? ? 31 : 7)
+      old = read_ea(mode, reg, size)
+      bit_set = (old & (1 << bit)) != 0
+      @ccr = (@ccr & ~FLAG_Z) | (bit_set ? 0 : FLAG_Z)
+
+      result = case operation
+               when 0 then old
+               when 1 then old ^ (1 << bit)
+               when 2 then old & ~(1 << bit)
+               else old | (1 << bit)
+               end
+      write_ea(mode, reg, size, result) unless operation.zero?
+      finish(mode.zero? ? 6 : 10)
+    end
+
+    def move_to_status(opcode)
+      ccr_only = (opcode & 0x0200).zero?
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      value = read_ea(mode, reg, SIZE_WORD)
+      ccr_only ? @ccr = value & 0x1F : self.sr = value
+      finish(12)
+    end
+
+    def move_from_sr(opcode)
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      write_ea(mode, reg, SIZE_WORD, sr)
+      finish(mode.zero? ? 6 : 8)
+    end
+
+    def clr(opcode)
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      raise NotImplementedError, "M68K invalid CLR size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
+
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      write_ea(mode, reg, size, 0)
+      @ccr = (@ccr & FLAG_X) | FLAG_Z
+      finish(mode.zero? ? (size == SIZE_LONG ? 6 : 4) : (size == SIZE_LONG ? 12 : 8))
+    end
+
+    def not_op(opcode)
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      raise NotImplementedError, "M68K invalid NOT size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
+
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      result = (~read_ea(mode, reg, size)) & mask_for(size)
+      write_ea(mode, reg, size, result)
+      set_nz_flags(result, size, keep_x: true)
+      finish(mode.zero? ? (size == SIZE_LONG ? 6 : 4) : (size == SIZE_LONG ? 12 : 8))
+    end
+
+    def swap(opcode)
+      reg = opcode & 0x07
+      value = @d[reg]
+      @d[reg] = ((value << 16) | (value >> 16)) & 0xFFFF_FFFF
+      set_nz_flags(@d[reg], SIZE_LONG, keep_x: true)
+      finish(4)
+    end
+
+    def move_usp(opcode)
+      reg = opcode & 0x07
+      if (opcode & 0x0008).zero?
+        write_address_register(reg, @usp)
+      else
+        @usp = read_address_register(reg) & 0xFFFF_FFFF
+      end
+      finish(4)
+    end
+
+    def add_sub(opcode, subtract:)
+      reg = (opcode >> 9) & 0x07
+      opmode = (opcode >> 6) & 0x07
+      mode = (opcode >> 3) & 0x07
+      ea_reg = opcode & 0x07
+
+      if opmode == 0x03 || opmode == 0x07
+        size = opmode == 0x03 ? SIZE_WORD : SIZE_LONG
+        source = read_ea(mode, ea_reg, size)
+        source = sign_extend(source, 16) if size == SIZE_WORD
+        result = subtract ? read_address_register(reg) - source : read_address_register(reg) + source
+        write_address_register(reg, result)
+        return finish(size == SIZE_LONG ? 8 : 8)
+      end
+
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
+      raise NotImplementedError, "M68K invalid #{subtract ? 'SUB' : 'ADD'} opmode #{opmode}" unless size
+
+      if opmode < 0x04
+        left = @d[reg]
+        right = read_ea(mode, ea_reg, size)
+        result = subtract ? left - right : left + right
+        write_data_register(reg, size, result)
+      else
+        left = read_ea(mode, ea_reg, size)
+        right = @d[reg]
+        result = subtract ? left - right : left + right
+        write_ea(mode, ea_reg, size, result)
+      end
+      set_add_sub_flags(left, right, result, size, subtract: subtract)
+      finish(size == SIZE_LONG ? 8 : 4)
+    end
+
+    def logical_operation(opcode, operation)
+      reg = (opcode >> 9) & 0x07
+      opmode = (opcode >> 6) & 0x07
+      mode = (opcode >> 3) & 0x07
+      ea_reg = opcode & 0x07
+      raise NotImplementedError, "M68K #{operation.upcase} opmode #{opmode}" unless [0, 1, 2, 4, 5, 6].include?(opmode)
+
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
+      if opmode < 4
+        left = @d[reg]
+        right = read_ea(mode, ea_reg, size)
+        result = operation == :and ? left & right : left | right
+        write_data_register(reg, size, result)
+      else
+        left = read_ea(mode, ea_reg, size)
+        right = @d[reg]
+        result = operation == :and ? left & right : left | right
+        write_ea(mode, ea_reg, size, result)
+      end
+      set_nz_flags(result, size, keep_x: true)
+      finish(size == SIZE_LONG ? 8 : 4)
+    end
+
+    def cmp(opcode)
+      reg = (opcode >> 9) & 0x07
+      opmode = (opcode >> 6) & 0x07
+      mode = (opcode >> 3) & 0x07
+      ea_reg = opcode & 0x07
+
+      if opmode == 0x03 || opmode == 0x07
+        size = opmode == 0x03 ? SIZE_WORD : SIZE_LONG
+        left = read_address_register(reg)
+        right = read_ea(mode, ea_reg, size)
+        right = sign_extend(right, 16) if size == SIZE_WORD
+        set_add_sub_flags(left, right, left - right, SIZE_LONG, subtract: true)
+      elsif opmode < 0x03
+        size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode]
+        left = @d[reg]
+        right = read_ea(mode, ea_reg, size)
+        set_add_sub_flags(left, right, left - right, size, subtract: true)
+      else
+        size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
+        left = read_ea(mode, ea_reg, size)
+        result = left ^ @d[reg]
+        write_ea(mode, ea_reg, size, result)
+        set_nz_flags(result, size, keep_x: true)
+      end
+      finish(4)
+    end
+
+    def immediate_operation(opcode)
+      operation = opcode & 0x0F00
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      raise NotImplementedError, "M68K invalid immediate size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
+
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      immediate = fetch_immediate(size)
+
+      if mode == 7 && reg == 4
+        immediate_to_status_register(operation, size, immediate)
+        return finish(20)
+      end
+
+      left = read_ea(mode, reg, size)
+      result = case operation
+               when 0x0000 then left | immediate
+               when 0x0200 then left & immediate
+               when 0x0400 then left - immediate
+               when 0x0600 then left + immediate
+               when 0x0A00 then left ^ immediate
+               when 0x0C00 then left - immediate
+               end
+
+      if operation == 0x0C00
+        set_add_sub_flags(left, immediate, result, size, subtract: true)
+      else
+        write_ea(mode, reg, size, result)
+        if operation == 0x0400 || operation == 0x0600
+          set_add_sub_flags(left, immediate, result, size, subtract: operation == 0x0400)
+        else
+          set_nz_flags(result, size, keep_x: true)
+        end
+      end
+      finish(mode == 0 ? (size == SIZE_LONG ? 16 : 8) : (size == SIZE_LONG ? 28 : 16))
+    end
+
+    def immediate_to_status_register(operation, size, immediate)
+      if size == SIZE_BYTE
+        case operation
+        when 0x0000 then @ccr = (@ccr | immediate) & 0x1F
+        when 0x0200 then @ccr &= immediate & 0x1F
+        when 0x0A00 then @ccr = (@ccr ^ immediate) & 0x1F
+        else
+          raise NotImplementedError, "M68K immediate CCR operation 0x#{operation.to_s(16)}"
+        end
+      elsif size == SIZE_WORD
+        case operation
+        when 0x0000 then self.sr = sr | immediate
+        when 0x0200 then self.sr = sr & immediate
+        when 0x0A00 then self.sr = sr ^ immediate
+        else
+          raise NotImplementedError, "M68K immediate SR operation 0x#{operation.to_s(16)}"
+        end
+      else
+        raise NotImplementedError, "M68K invalid immediate status register size"
+      end
+    end
+
     def addq_subq(opcode)
       value = (opcode >> 9) & 0x07
       value = 8 if value.zero?
@@ -161,25 +454,85 @@ module MegaDrive
       finish(mode == 0 || mode == 1 ? 4 : 8)
     end
 
+    def tst(opcode)
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      raise NotImplementedError, "M68K invalid TST size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
+
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      value = read_ea(mode, reg, size)
+      set_nz_flags(value, size, keep_x: true)
+      finish(mode == 0 ? 4 : 8)
+    end
+
+    def movem(opcode)
+      memory_to_register = (opcode & 0x0400) != 0
+      size = (opcode & 0x0040) != 0 ? SIZE_LONG : SIZE_WORD
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      mask = fetch_word
+
+      if memory_to_register
+        address = effective_address(mode, reg, size)
+        register_order.each_with_index do |target, bit|
+          next if (mask & (1 << bit)).zero?
+
+          value = read_sized(address, size)
+          write_movem_register(target, size == SIZE_WORD ? sign_extend(value, 16) : value)
+          address = (address + (size == SIZE_LONG ? 4 : 2)) & ADDRESS_MASK
+        end
+        write_address_register(reg, address) if mode == 3
+      else
+        address = effective_address(mode, reg, size)
+        order = mode == 4 ? register_order.reverse : register_order
+        order.each_with_index do |target, index|
+          bit = mode == 4 ? index : register_order.index(target)
+          next if (mask & (1 << bit)).zero?
+
+          address = (address - (size == SIZE_LONG ? 4 : 2)) & ADDRESS_MASK if mode == 4
+          write_sized(address, size, read_movem_register(target))
+          address = (address + (size == SIZE_LONG ? 4 : 2)) & ADDRESS_MASK unless mode == 4
+        end
+        write_address_register(reg, address) if mode == 4
+      end
+
+      finish(12 + mask.digits(2).count(1) * (size == SIZE_LONG ? 8 : 4))
+    end
+
     def branch(opcode)
       condition = (opcode >> 8) & 0x0F
       displacement = opcode & 0xFF
-      offset = if displacement.zero?
-                 sign_extend(fetch_word, 16)
-               else
-                 sign_extend(displacement, 8)
-               end
+      base = @pc
+      offset = displacement.zero? ? sign_extend(fetch_word, 16) : sign_extend(displacement, 8)
+      target = (base + offset) & ADDRESS_MASK
       if condition == 1
         push_long(@pc)
-        @pc = (@pc + offset) & ADDRESS_MASK
+        @pc = target
         return finish(displacement.zero? ? 18 : 18)
       end
 
       if condition_true?(condition)
-        @pc = (@pc + offset) & ADDRESS_MASK
+        @pc = target
         finish(displacement.zero? ? 10 : 10)
       else
         finish(displacement.zero? ? 12 : 8)
+      end
+    end
+
+    def dbcc(opcode)
+      condition = (opcode >> 8) & 0x0F
+      reg = opcode & 0x07
+      displacement_base = @pc
+      displacement = sign_extend(fetch_word, 16)
+      return finish(12) if condition_true?(condition)
+
+      counter = ((@d[reg] & 0xFFFF) - 1) & 0xFFFF
+      @d[reg] = (@d[reg] & 0xFFFF_0000) | counter
+      if counter != 0xFFFF
+        @pc = (displacement_base + displacement) & ADDRESS_MASK
+        finish(10)
+      else
+        finish(14)
       end
     end
 
@@ -241,10 +594,14 @@ module MegaDrive
         read_sized(address, size)
       when 5
         read_sized((read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK, size)
+      when 6
+        read_sized(address_index_address(reg), size)
       when 7
         case reg
         when 0 then read_sized(sign_extend(fetch_word, 16) & ADDRESS_MASK, size)
         when 1 then read_sized(fetch_long, size)
+        when 2 then read_sized(pc_displacement_address, size)
+        when 3 then read_sized(pc_index_address, size)
         when 4 then fetch_immediate(size)
         else
           raise NotImplementedError, "M68K source EA mode 7/#{reg}"
@@ -272,6 +629,8 @@ module MegaDrive
         write_sized(address, size, value)
       when 5
         write_sized((read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK, size, value)
+      when 6
+        write_sized(address_index_address(reg), size, value)
       when 7
         case reg
         when 0 then write_sized(sign_extend(fetch_word, 16) & ADDRESS_MASK, size, value)
@@ -288,12 +647,20 @@ module MegaDrive
       case mode
       when 2
         read_address_register(reg)
+      when 3
+        read_address_register(reg)
+      when 4
+        read_address_register(reg)
       when 5
         (read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+      when 6
+        address_index_address(reg)
       when 7
         case reg
         when 0 then sign_extend(fetch_word, 16) & ADDRESS_MASK
         when 1 then fetch_long
+        when 2 then pc_displacement_address
+        when 3 then pc_index_address
         else
           raise NotImplementedError, "M68K EA mode 7/#{reg}"
         end
@@ -311,6 +678,20 @@ module MegaDrive
       reg == 7 ? set_sp(value) : @a[reg] = value
     end
 
+    def register_order
+      @register_order ||= (0..7).map { |reg| [:d, reg] } + (0..7).map { |reg| [:a, reg] }
+    end
+
+    def read_movem_register(target)
+      kind, reg = target
+      kind == :d ? @d[reg] : read_address_register(reg)
+    end
+
+    def write_movem_register(target, value)
+      kind, reg = target
+      kind == :d ? @d[reg] = value & 0xFFFF_FFFF : write_address_register(reg, value)
+    end
+
     def sp
       @supervisor ? @ssp : @usp
     end
@@ -325,10 +706,33 @@ module MegaDrive
       write_long(sp, value)
     end
 
+    def push_word(value)
+      set_sp(sp - 2)
+      write_word(sp, value)
+    end
+
+    def pop_word
+      value = read_word(sp)
+      set_sp(sp + 2)
+      value
+    end
+
     def pop_long
       value = read_long(sp)
       set_sp(sp + 4)
       value
+    end
+
+    def service_interrupt(level)
+      old_sr = sr
+      @stopped = false
+      @supervisor = true
+      @interrupt_priority_mask = level & 0x07
+      push_long(@pc)
+      push_word(old_sr)
+      @bus.acknowledge_interrupt(level) if @bus.respond_to?(:acknowledge_interrupt)
+      @pc = read_long((24 + level) * 4) & ADDRESS_MASK
+      finish(44)
     end
 
     def fetch_word
@@ -347,6 +751,35 @@ module MegaDrive
       when SIZE_WORD then fetch_word
       else fetch_long
       end
+    end
+
+    def pc_displacement_address
+      base = @pc
+      (base + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+    end
+
+    def pc_index_address
+      base = @pc
+      extension = fetch_word
+      brief_index_address(base, extension)
+    end
+
+    def address_index_address(reg)
+      base = read_address_register(reg)
+      extension = fetch_word
+      brief_index_address(base, extension)
+    end
+
+    def brief_index_address(base, extension)
+      index_reg = (extension >> 12) & 0x07
+      index = if (extension & 0x8000) != 0
+                read_address_register(index_reg)
+              else
+                @d[index_reg]
+              end
+      index = sign_extend(index, 16) if (extension & 0x0800).zero?
+      displacement = sign_extend(extension & 0xFF, 8)
+      (base + index + displacement) & ADDRESS_MASK
     end
 
     def read_sized(address, size)

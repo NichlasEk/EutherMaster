@@ -1,12 +1,13 @@
 module MegaDrive
   class Emulator
-    attr_reader :cpu, :bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio
+    attr_reader :cpu, :bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp
 
     CYCLES_PER_FRAME = 127_800
 
     def initialize
       build_audio
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612)
+      build_video
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp)
       @cpu = M68K.new(@bus)
       @frame_count = 0
       @rom_loaded = false
@@ -21,7 +22,8 @@ module MegaDrive
     def load_rom_data(data, info: nil)
       @rom_info = info
       build_audio
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612)
+      build_video
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp)
       @bus.load(0, normalized_rom_bytes(data, info))
       @cpu = M68K.new(@bus)
       @rom_loaded = true
@@ -32,6 +34,7 @@ module MegaDrive
     def reset
       @sms_psg.reset
       @ym2612.reset
+      @vdp.reset
       @cpu.reset if @rom_loaded
       @frame_count = 0
       reset_perf
@@ -44,6 +47,7 @@ module MegaDrive
       cycles = 0
       steps = 0
       @audio.begin_frame
+      @vdp.request_vblank!
       while cycles < CYCLES_PER_FRAME
         begin
           step_cycles = @cpu.step
@@ -54,13 +58,14 @@ module MegaDrive
           break
         end
       end
+      @vdp.render_frame
       @frame_count += 1
       @render_version += 1
       record_perf(monotonic_time - started, steps)
     end
 
     def framebuffer
-      @framebuffer ||= build_placeholder_framebuffer
+      @vdp.framebuffer
     end
 
     def psg = @audio
@@ -95,17 +100,13 @@ module MegaDrive
       @audio = Audio.new(@sms_psg, @ym2612)
     end
 
+    def build_video
+      @vdp = VDP.new
+    end
+
     def normalized_rom_bytes(data, info)
       bytes = data.is_a?(String) ? data.bytes : data.dup
       info&.copier_header && bytes.length > 512 ? bytes[512..] : bytes
-    end
-
-    def build_placeholder_framebuffer
-      Array.new(256 * 192) do |index|
-        x = index % 256
-        y = index / 256
-        ((x / 16) + (y / 16)) & 0x0F
-      end
     end
 
     def monotonic_time

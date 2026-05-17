@@ -4,6 +4,18 @@ RSpec.describe MegaDrive::M68K do
   let(:bus) { MegaDrive::M68KBus.new }
   let(:cpu) { described_class.new(bus) }
 
+  class InterruptBus < MegaDrive::M68KBus
+    attr_accessor :level
+    attr_reader :acknowledged
+
+    def interrupt_level = @level || 0
+
+    def acknowledge_interrupt(level)
+      @acknowledged = level
+      @level = 0
+    end
+  end
+
   def reset_to(address)
     bus.write_long(0x000000, 0x00FF0000)
     bus.write_long(0x000004, address)
@@ -78,6 +90,21 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.d[0]).to eq(0x0000_0001)
   end
 
+  it 'uses the extension word address as the base for word branch displacements' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x6100, 0x0004, # BSR.W -> $106
+      0x60FE,         # skipped trap
+      0x7042,         # MOVEQ #$42,D0
+      0x4E75          # RTS
+    ])
+
+    cpu.step
+    expect(cpu.pc).to eq(0x106)
+    cpu.step
+    expect(cpu.d[0]).to eq(0x42)
+  end
+
   it 'jumps and calls through absolute long addresses' do
     reset_to(0x100)
     load_program(0x100, [0x4EB9, 0x0000, 0x0200, 0x7001])
@@ -106,5 +133,270 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.d[0]).to eq(0xFFFF_FFFF)
     expect(cpu.flag_n?).to be true
     expect(cpu.flag_c?).to be true
+  end
+
+  it 'tests memory values without changing X' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4AB9, 0x0000, 0x0040 # TST.L $00000040
+    ])
+    bus.write_long(0x40, 0x8000_0000)
+    cpu.sr = 0x2010
+
+    cpu.step
+
+    expect(cpu.flag_n?).to be true
+    expect(cpu.flag_z?).to be false
+    expect(cpu.flag_x?).to be true
+  end
+
+  it 'handles PC-relative effective addresses' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x41FA, 0x0006, # LEA 6(PC),A0 -> $108
+      0x303A, 0x0004  # MOVE.W 4(PC),D0 -> word at $10A
+    ])
+    bus.write_word(0x10A, 0xCAFE)
+
+    cpu.step
+    cpu.step
+
+    expect(cpu.a[0]).to eq(0x108)
+    expect(cpu.d[0] & 0xFFFF).to eq(0xCAFE)
+  end
+
+  it 'moves multiple registers from postincrement memory' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4C98, 0x00C0 # MOVEM.W (A0)+,D6-D7
+    ])
+    cpu.instance_variable_get(:@a)[0] = 0x200
+    bus.write_word(0x200, 0x1111)
+    bus.write_word(0x202, 0xFFFE)
+
+    cpu.step
+
+    expect(cpu.d[6]).to eq(0x1111)
+    expect(cpu.d[7]).to eq(0xFFFF_FFFE)
+    expect(cpu.a[0]).to eq(0x204)
+  end
+
+  it 'executes immediate logical and compare operations' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x700F,       # MOVEQ #$0F,D0
+      0x0200, 0x03, # ANDI.B #$03,D0
+      0x0C00, 0x03  # CMPI.B #$03,D0
+    ])
+
+    3.times { cpu.step }
+
+    expect(cpu.d[0]).to eq(0x03)
+    expect(cpu.flag_z?).to be true
+  end
+
+  it 'moves values between USP and address registers' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4E68, # MOVE A0,USP
+      0x4E61  # MOVE USP,A1
+    ])
+    cpu.instance_variable_get(:@a)[0] = 0x1234_5678
+
+    2.times { cpu.step }
+
+    expect(cpu.usp).to eq(0x1234_5678)
+    expect(cpu.a[1]).to eq(0x1234_5678)
+  end
+
+  it 'executes register arithmetic and comparisons' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x7A05, # MOVEQ #5,D5
+      0x7E03, # MOVEQ #3,D7
+      0xDA47, # ADD.W D7,D5
+      0xBA47  # CMP.W D7,D5
+    ])
+
+    4.times { cpu.step }
+
+    expect(cpu.d[5] & 0xFFFF).to eq(8)
+    expect(cpu.flag_z?).to be false
+    expect(cpu.flag_c?).to be false
+  end
+
+  it 'executes DBcc loops' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x7201,       # MOVEQ #1,D1
+      0x51C9, 0xFFFE # DBF D1,*-2
+    ])
+
+    cpu.step
+    cpu.step
+    expect(cpu.pc).to eq(0x102)
+    expect(cpu.d[1] & 0xFFFF).to eq(0)
+
+    cpu.step
+    expect(cpu.pc).to eq(0x106)
+    expect(cpu.d[1] & 0xFFFF).to eq(0xFFFF)
+  end
+
+  it 'executes dynamic bit tests and mutations' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x7003, # MOVEQ #3,D0
+      0x0111, # BTST D0,(A1)
+      0x0151  # BCHG D0,(A1)
+    ])
+    cpu.instance_variable_get(:@a)[1] = 0x200
+    bus.write_byte(0x200, 0x08)
+
+    3.times { cpu.step }
+
+    expect(cpu.flag_z?).to be false
+    expect(bus.read_byte(0x200)).to eq(0)
+  end
+
+  it 'moves immediate values into SR' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x46FC, 0x2700
+    ])
+
+    cpu.step
+
+    expect(cpu.sr).to eq(0x2700)
+  end
+
+  it 'moves SR into a destination operand' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x46FC, 0x270F,
+      0x40C6
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.d[6] & 0xFFFF).to eq(0x270F)
+  end
+
+  it 'clears operands and preserves extend' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x70FF, # MOVEQ #-1,D0
+      0x4280  # CLR.L D0
+    ])
+    cpu.step
+    cpu.sr = cpu.sr | 0x10
+    cpu.step
+
+    expect(cpu.d[0]).to eq(0)
+    expect(cpu.flag_z?).to be true
+    expect(cpu.flag_x?).to be true
+  end
+
+  it 'inverts operands with NOT' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x700F, # MOVEQ #$0F,D0
+      0x4600  # NOT.B D0
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.d[0] & 0xFF).to eq(0xF0)
+    expect(cpu.flag_n?).to be true
+  end
+
+  it 'executes logical and arithmetic register shifts' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x703F, # MOVEQ #$3F,D0
+      0xEC08  # LSR.B #6,D0
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.d[0] & 0xFF).to eq(0)
+    expect(cpu.flag_c?).to be true
+    expect(cpu.flag_z?).to be true
+  end
+
+  it 'handles address-register indexed effective addresses' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x3030, 0x0004 # MOVE.W 4(A0,D0.W),D0
+    ])
+    cpu.instance_variable_get(:@a)[0] = 0x200
+    cpu.instance_variable_get(:@d)[0] = 2
+    bus.write_word(0x206, 0xBEEF)
+
+    cpu.step
+
+    expect(cpu.d[0] & 0xFFFF).to eq(0xBEEF)
+  end
+
+  it 'executes register logical operations' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x740F, # MOVEQ #$0F,D2
+      0x7803, # MOVEQ #$03,D4
+      0x8882, # OR.L D2,D4
+      0xC482  # AND.L D2,D2
+    ])
+
+    4.times { cpu.step }
+
+    expect(cpu.d[4]).to eq(0x0F)
+    expect(cpu.d[2]).to eq(0x0F)
+    expect(cpu.flag_z?).to be false
+  end
+
+  it 'executes EOR from data register to destination' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x700F, # MOVEQ #$0F,D0
+      0x7203, # MOVEQ #$03,D1
+      0xB100  # EOR.B D0,D0
+    ])
+
+    3.times { cpu.step }
+
+    expect(cpu.d[0] & 0xFF).to eq(0)
+    expect(cpu.flag_z?).to be true
+  end
+
+  it 'swaps data register words' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x243C, 0x1234, 0x5678, # MOVE.L #$12345678,D2
+      0x4842                  # SWAP D2
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.d[2]).to eq(0x5678_1234)
+  end
+
+  it 'services autovector interrupts and returns with RTE' do
+    bus = InterruptBus.new
+    cpu = described_class.new(bus)
+    bus.write_long(0x000000, 0x00FF0000)
+    bus.write_long(0x000004, 0x200)
+    bus.write_long((24 + 6) * 4, 0x300)
+    bus.write_word(0x200, 0x4E71)
+    bus.write_word(0x300, 0x4E73)
+    cpu.reset
+    cpu.sr = 0x2300
+    bus.level = 6
+
+    cpu.step
+    expect(cpu.pc).to eq(0x300)
+    expect(bus.acknowledged).to eq(6)
+
+    cpu.step
+    expect(cpu.pc).to eq(0x200)
+    expect(cpu.sr).to eq(0x2300)
   end
 end

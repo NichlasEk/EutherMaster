@@ -49,4 +49,46 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.psg).to be_a(MegaDrive::Audio)
     expect(emulator.psg).to respond_to(:render_frame_samples)
   end
+
+  it 'grants the Z80 bus immediately for 68k-side boot code' do
+    bus = MegaDrive::M68KBus.new
+
+    expect(bus.read_byte(0xA11100) & 0x01).to eq(1)
+
+    bus.write_word(0xA11100, 0x0100)
+
+    expect(bus.read_byte(0xA11100) & 0x01).to eq(0)
+  end
+
+  it 'routes 68k-side VDP ports to the Mega Drive VDP' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+
+    bus.write_word(0xC00004, 0x8F02)
+    bus.write_word(0xC00004, 0xC000)
+    bus.write_word(0xC00004, 0x0000)
+    bus.write_word(0xC00000, 0x0EEE)
+    vdp.render_frame
+
+    expect(vdp.registers[15]).to eq(2)
+    expect(vdp.cram[0]).to eq(0x0EEE)
+    expect(vdp.framebuffer.any? { |pixel| pixel != 0 }).to be(true)
+  end
+
+  it 'binds the UI-visible framebuffer to the Mega Drive VDP' do
+    emulator = MegaDrive::Emulator.new
+
+    expect(emulator.vdp.framebuffer).to equal(emulator.framebuffer)
+  end
+
+  it 'shows VRAM activity before CRAM has been populated' do
+    vdp = MegaDrive::VDP.new
+    vdp.write_control(0x4000)
+    vdp.write_control(0x0000)
+    vdp.write_data(0x1234)
+    vdp.render_frame
+
+    expect(vdp.cram.all?(&:zero?)).to be(true)
+    expect(vdp.framebuffer.any? { |pixel| pixel != 0 }).to be(true)
+  end
 end
