@@ -6,6 +6,7 @@ module AstralVerse
     GESTURE_EAST    = 0x08
     GESTURE_PRIMUS  = 0x10
     GESTURE_SECUNDUS = 0x20
+    GESTURE_START   = 0x80
 
     attr_accessor :left_palm, :right_palm
 

@@ -42,10 +42,15 @@ module AstralVerse
         { id: :right, label: 'Right', gesture: MysticTouch::GESTURE_EAST, default: SDL3::K_RIGHT, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_RIGHT },
         { id: :button_1, label: 'Button 1', gesture: MysticTouch::GESTURE_PRIMUS, default: SDL3::K_Z, pad_default: SDL3::GAMEPAD_BUTTON_SOUTH },
         { id: :button_2, label: 'Button 2', gesture: MysticTouch::GESTURE_SECUNDUS, default: SDL3::K_X, pad_default: SDL3::GAMEPAD_BUTTON_EAST },
-        { id: :pause, label: 'Pause', special: :pause, default: SDL3::K_P, pad_default: SDL3::GAMEPAD_BUTTON_START },
+        { id: :pause, label: 'Pause', gesture: MysticTouch::GESTURE_START, special: :pause, default: SDL3::K_P, pad_default: SDL3::GAMEPAD_BUTTON_START },
         { id: :reset, label: 'Reset', special: :reset, default: SDL3::K_R, pad_default: SDL3::GAMEPAD_BUTTON_BACK }
       ].freeze
       INPUT_ACTION_BY_ID = INPUT_ACTIONS.each_with_object({}) { |action, map| map[action[:id]] = action }.freeze
+      INPUT_KEY_ALIASES = INPUT_ACTIONS.each_with_object({}) do |action, aliases|
+        keys = [action[:default]]
+        keys << SDL3::K_RETURN if action[:id] == :pause
+        aliases[action[:id]] = keys.compact.uniq
+      end.freeze
 
       COLORS = {
         bg: [18, 12, 28, 255],
@@ -151,6 +156,8 @@ module AstralVerse
         SDL3.set_render_draw_blend_mode(@renderer, SDL3::BLENDMODE_BLEND)
         @screen_texture = SDL3.check(SDL3.create_texture(@renderer, SDL3::PIXELFORMAT_RGBA32,
           SDL3::TEXTUREACCESS_STREAMING, SMS_W, SMS_H), 'SDL_CreateTexture')
+        @screen_texture_width = SMS_W
+        @screen_texture_height = SMS_H
         SDL3.set_texture_scale_mode(@screen_texture, SDL3::SCALEMODE_NEAREST)
         @event = FFI::MemoryPointer.new(:uint8, 128)
         @size_w_ptr = FFI::MemoryPointer.new(:int)
@@ -560,12 +567,12 @@ module AstralVerse
       end
 
       def draw_sms_debug_mask(viewport)
-        pixel_width = viewport[:w] / SMS_W.to_f
+        pixel_width = viewport[:w] / screen_width.to_f
         fill_rect(viewport[:x], viewport[:y], pixel_width * 8, viewport[:h], [0, 0, 0, 255])
       end
 
       def draw_scanlines(viewport)
-        pixel_h = viewport[:h] / SMS_H.to_f
+        pixel_h = viewport[:h] / screen_height.to_f
         line_h = [[pixel_h * 0.22, 1.0].max, pixel_h * 0.5].min
         alpha = (170 * @scanline_strength).round.clamp(0, 170)
         y = viewport[:y] + pixel_h - line_h
@@ -769,7 +776,7 @@ module AstralVerse
           gesture = action[:gesture]
           next unless gesture
 
-          port &= ~gesture if keys[@key_bindings[action[:id]]] || pad_buttons[@controller_bindings[action[:id]]]
+          port &= ~gesture if action_pressed?(action[:id], keys, pad_buttons)
         end
 
         @input_port_a = port
@@ -791,6 +798,17 @@ module AstralVerse
       def rebuild_key_lookup
         @key_to_action = {}
         @key_bindings.each { |action, key| @key_to_action[key] = action if key && key.positive? }
+        INPUT_KEY_ALIASES.each do |action, keys|
+          keys.each { |key| @key_to_action[key] ||= action if key && key.positive? }
+        end
+      end
+
+      def action_pressed?(action_id, keys, pad_buttons)
+        bound_key = @key_bindings[action_id]
+        return true if bound_key && keys[bound_key]
+
+        (INPUT_KEY_ALIASES[action_id] || []).any? { |key| keys[key] } ||
+          pad_buttons[@controller_bindings[action_id]]
       end
 
       def load_controller_bindings
@@ -966,15 +984,31 @@ module AstralVerse
         return if @last_uploaded_render_version == render_version
 
         framebuffer = @stone.vision_sprite.scrying_pool
+        width = screen_width
+        height = screen_height
+        ensure_screen_texture(width, height)
         @frame_rgba.clear
         if @sharp_pixels
-          append_edge_sharpened_frame(framebuffer)
+          append_edge_sharpened_frame(framebuffer, width, height)
         else
-          append_raw_frame(framebuffer)
+          append_raw_frame(framebuffer, width, height)
         end
         @frame_pixels.put_bytes(0, @frame_rgba)
-        SDL3.update_texture(@screen_texture, nil, @frame_pixels, SMS_W * 4)
+        SDL3.update_texture(@screen_texture, nil, @frame_pixels, width * 4)
         @last_uploaded_render_version = render_version
+      end
+
+      def ensure_screen_texture(width, height)
+        return if @screen_texture_width == width && @screen_texture_height == height
+
+        SDL3.destroy_texture(@screen_texture) if @screen_texture && !@screen_texture.null?
+        @screen_texture = SDL3.check(SDL3.create_texture(@renderer, SDL3::PIXELFORMAT_RGBA32,
+          SDL3::TEXTUREACCESS_STREAMING, width, height), 'SDL_CreateTexture')
+        SDL3.set_texture_scale_mode(@screen_texture, SDL3::SCALEMODE_NEAREST)
+        @screen_texture_width = width
+        @screen_texture_height = height
+        @frame_pixels = FFI::MemoryPointer.new(:uint8, width * height * 4)
+        @frame_rgba = String.new(capacity: width * height * 4, encoding: Encoding::BINARY)
       end
 
       def emulator_render_version
@@ -988,34 +1022,45 @@ module AstralVerse
         end
       end
 
-      def append_raw_frame(framebuffer)
-        pixel_count = SMS_W * SMS_H
+      def append_raw_frame(framebuffer, width, height)
+        pixel_count = width * height
         index = 0
+        palette = active_palette_rgba
         while index < pixel_count
-          @frame_rgba << @palette_rgba[(framebuffer[index] || 0) & 0x3F]
+          @frame_rgba << palette[(framebuffer[index] || 0) & 0x3F]
           index += 1
         end
       end
 
-      def append_edge_sharpened_frame(framebuffer)
-        normal = @palette_rgba
-        sharp = @sharp_palette_rgba
-        last_x = SMS_W - 1
-        last_y = SMS_H - 1
+      def append_edge_sharpened_frame(framebuffer, width, height)
+        normal = active_palette_rgba
+        sharp = active_sharp_palette_rgba
+        last_x = width - 1
+        last_y = height - 1
         y = 0
-        while y < SMS_H
-          row = y * SMS_W
+        while y < height
+          row = y * width
           x = 0
-          while x < SMS_W
+          while x < width
             index = row + x
             color = (framebuffer[index] || 0) & 0x3F
             edge = (x < last_x && ((framebuffer[index + 1] || 0) & 0x3F) != color) ||
-              (y < last_y && ((framebuffer[index + SMS_W] || 0) & 0x3F) != color)
+              (y < last_y && ((framebuffer[index + width] || 0) & 0x3F) != color)
             @frame_rgba << (edge ? sharp[color] : normal[color])
             x += 1
           end
           y += 1
         end
+      end
+
+      def active_palette_rgba
+        vdp = @stone.emulator.respond_to?(:vdp) ? @stone.emulator.vdp : nil
+        vdp&.respond_to?(:palette_rgba) ? vdp.palette_rgba : @palette_rgba
+      end
+
+      def active_sharp_palette_rgba
+        vdp = @stone.emulator.respond_to?(:vdp) ? @stone.emulator.vdp : nil
+        vdp&.respond_to?(:sharp_palette_rgba) ? vdp.sharp_palette_rgba : @sharp_palette_rgba
       end
 
       def sharp_channel(value)
@@ -1024,11 +1069,23 @@ module AstralVerse
       end
 
       def screen_viewport
-        scale = [window_width.to_f / SMS_W, content_height.to_f / SMS_H].min
+        width = screen_width
+        height = screen_height
+        scale = [window_width.to_f / width, content_height.to_f / height].min
         scale = [scale, 0.1].max
-        w = SMS_W * scale
-        h = SMS_H * scale
+        w = width * scale
+        h = height * scale
         { x: (window_width - w) / 2.0, y: content_top + (content_height - h) / 2.0, w: w, h: h }
+      end
+
+      def screen_width
+        vdp = @stone.emulator&.respond_to?(:vdp) ? @stone.emulator.vdp : nil
+        vdp&.respond_to?(:screen_width) ? vdp.screen_width : SMS_W
+      end
+
+      def screen_height
+        vdp = @stone.emulator&.respond_to?(:vdp) ? @stone.emulator.vdp : nil
+        vdp&.respond_to?(:screen_height) ? vdp.screen_height : SMS_H
       end
 
       def content_top

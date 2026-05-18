@@ -1,13 +1,14 @@
 module MegaDrive
   class Emulator
-    attr_reader :cpu, :bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp
+    attr_reader :cpu, :bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
 
     CYCLES_PER_FRAME = 127_800
 
     def initialize
       build_audio
       build_video
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp)
+      @controller = Controller.new
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
       @cpu = M68K.new(@bus)
       @frame_count = 0
       @rom_loaded = false
@@ -23,8 +24,9 @@ module MegaDrive
       @rom_info = info
       build_audio
       build_video
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp)
-      @bus.load(0, normalized_rom_bytes(data, info))
+      @controller = Controller.new
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
+      @bus.load_rom(normalized_rom_bytes(data, info))
       @cpu = M68K.new(@bus)
       @rom_loaded = true
       @render_version += 1
@@ -35,6 +37,7 @@ module MegaDrive
       @sms_psg.reset
       @ym2612.reset
       @vdp.reset
+      @controller.reset
       @cpu.reset if @rom_loaded
       @frame_count = 0
       reset_perf
@@ -69,7 +72,6 @@ module MegaDrive
     end
 
     def psg = @audio
-    def controller = nil
     def request_pause; end
     def rewire_after_snapshot_load = self
 

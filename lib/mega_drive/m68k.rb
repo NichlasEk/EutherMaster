@@ -116,14 +116,20 @@ module MegaDrive
         return bit_operation(opcode) if bit_operation?(opcode)
         return move_from_sr(opcode) if (opcode & 0xFFC0) == 0x40C0
         return clr(opcode) if (opcode & 0xFF00) == 0x4200
+        return move_to_status(opcode) if (opcode & 0xFFC0) == 0x46C0 || (opcode & 0xFFC0) == 0x44C0
+        return neg(opcode) if (opcode & 0xFF00) == 0x4400
         return not_op(opcode) if (opcode & 0xFF00) == 0x4600 && ((opcode >> 6) & 0x03) != 0x03
         return swap(opcode) if (opcode & 0xFFF8) == 0x4840
-        return move_to_status(opcode) if (opcode & 0xFFC0) == 0x46C0 || (opcode & 0xFFC0) == 0x44C0
         return move_usp(opcode) if (opcode & 0xFFF0) == 0x4E60
         return immediate_operation(opcode) if immediate_operation?(opcode)
         return add_sub(opcode, subtract: false) if (opcode & 0xF000) == 0xD000
         return add_sub(opcode, subtract: true) if (opcode & 0xF000) == 0x9000
+        return divide(opcode, signed: false) if (opcode & 0xF1C0) == 0x80C0
+        return divide(opcode, signed: true) if (opcode & 0xF1C0) == 0x81C0
         return logical_operation(opcode, :or) if (opcode & 0xF000) == 0x8000
+        return multiply(opcode, signed: false) if (opcode & 0xF1C0) == 0xC0C0
+        return multiply(opcode, signed: true) if (opcode & 0xF1C0) == 0xC1C0
+        return exg(opcode) if exg_opcode?(opcode)
         return logical_operation(opcode, :and) if (opcode & 0xF000) == 0xC000
         return cmp(opcode) if (opcode & 0xF000) == 0xB000
         return shift_register(opcode) if (opcode & 0xF000) == 0xE000 && ((opcode >> 6) & 0x03) != 0x03
@@ -155,6 +161,10 @@ module MegaDrive
 
     def bit_operation?(opcode)
       (opcode & 0xF100) == 0x0100 || (opcode & 0xFF00) == 0x0800
+    end
+
+    def exg_opcode?(opcode)
+      (opcode & 0xF100) == 0xC100 && [0x08, 0x09, 0x11].include?((opcode >> 3) & 0x1F)
     end
 
     def move(opcode)
@@ -194,17 +204,48 @@ module MegaDrive
       sign = sign_bit_for(size)
       result = value
       carry = false
+      overflow = false
 
       count.times do
-        if left
-          carry = (result & sign) != 0
-          result = (result << 1) & mask
-        elsif type.zero?
-          carry = (result & 0x01) != 0
-          result = ((result >> 1) | (result & sign)) & mask
-        else
-          carry = (result & 0x01) != 0
-          result = (result >> 1) & mask
+        case type
+        when 0 # ASL/ASR
+          if left
+            carry = (result & sign) != 0
+            shifted = (result << 1) & mask
+            overflow ||= ((result ^ shifted) & sign) != 0
+            result = shifted
+          else
+            carry = (result & 0x01) != 0
+            result = ((result >> 1) | (result & sign)) & mask
+          end
+          @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+        when 1 # LSL/LSR
+          if left
+            carry = (result & sign) != 0
+            result = (result << 1) & mask
+          else
+            carry = (result & 0x01) != 0
+            result = (result >> 1) & mask
+          end
+          @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+        when 2 # ROXL/ROXR
+          extend = (@ccr & FLAG_X) != 0
+          if left
+            carry = (result & sign) != 0
+            result = ((result << 1) | (extend ? 1 : 0)) & mask
+          else
+            carry = (result & 0x01) != 0
+            result = ((result >> 1) | (extend ? sign : 0)) & mask
+          end
+          @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+        when 3 # ROL/ROR
+          if left
+            carry = (result & sign) != 0
+            result = ((result << 1) | (carry ? 1 : 0)) & mask
+          else
+            carry = (result & 0x01) != 0
+            result = ((result >> 1) | (carry ? sign : 0)) & mask
+          end
         end
       end
 
@@ -212,8 +253,10 @@ module MegaDrive
       if count.zero?
         set_nz_flags(result, size, keep_x: true)
       else
-        @ccr = 0
-        @ccr |= FLAG_C | FLAG_X if carry
+        extend = @ccr & FLAG_X
+        @ccr = extend
+        @ccr |= FLAG_C if carry
+        @ccr |= FLAG_V if overflow
         @ccr |= FLAG_Z if result.zero?
         @ccr |= FLAG_N if (result & sign) != 0
       end
@@ -228,7 +271,13 @@ module MegaDrive
       reg = opcode & 0x07
       size = mode.zero? ? SIZE_LONG : SIZE_BYTE
       bit = bit_number & (mode.zero? ? 31 : 7)
-      old = read_ea(mode, reg, size)
+      address = nil
+      old = if mode.zero? || operation.zero?
+              read_ea(mode, reg, size)
+            else
+              address = writable_memory_ea_address(mode, reg, size)
+              read_sized(address, size)
+            end
       bit_set = (old & (1 << bit)) != 0
       @ccr = (@ccr & ~FLAG_Z) | (bit_set ? 0 : FLAG_Z)
 
@@ -238,7 +287,9 @@ module MegaDrive
                when 2 then old & ~(1 << bit)
                else old | (1 << bit)
                end
-      write_ea(mode, reg, size, result) unless operation.zero?
+      if operation != 0
+        mode.zero? ? write_ea(mode, reg, size, result) : write_sized(address, size, result)
+      end
       finish(mode.zero? ? 6 : 10)
     end
 
@@ -269,14 +320,24 @@ module MegaDrive
       finish(mode.zero? ? (size == SIZE_LONG ? 6 : 4) : (size == SIZE_LONG ? 12 : 8))
     end
 
+    def neg(opcode)
+      size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
+      raise NotImplementedError, "M68K invalid NEG size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
+
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      old, result = mutate_ea(mode, reg, size) { |value| -value }
+      set_add_sub_flags(0, old, result, size, subtract: true)
+      finish(mode.zero? ? (size == SIZE_LONG ? 6 : 4) : (size == SIZE_LONG ? 12 : 8))
+    end
+
     def not_op(opcode)
       size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][(opcode >> 6) & 0x03]
       raise NotImplementedError, "M68K invalid NOT size at 0x#{((@pc - 2) & ADDRESS_MASK).to_s(16).upcase}" unless size
 
       mode = (opcode >> 3) & 0x07
       reg = opcode & 0x07
-      result = (~read_ea(mode, reg, size)) & mask_for(size)
-      write_ea(mode, reg, size, result)
+      _old, result = mutate_ea(mode, reg, size) { |value| ~value }
       set_nz_flags(result, size, keep_x: true)
       finish(mode.zero? ? (size == SIZE_LONG ? 6 : 4) : (size == SIZE_LONG ? 12 : 8))
     end
@@ -323,10 +384,8 @@ module MegaDrive
         result = subtract ? left - right : left + right
         write_data_register(reg, size, result)
       else
-        left = read_ea(mode, ea_reg, size)
         right = @d[reg]
-        result = subtract ? left - right : left + right
-        write_ea(mode, ea_reg, size, result)
+        left, result = mutate_ea(mode, ea_reg, size) { |value| subtract ? value - right : value + right }
       end
       set_add_sub_flags(left, right, result, size, subtract: subtract)
       finish(size == SIZE_LONG ? 8 : 4)
@@ -337,7 +396,7 @@ module MegaDrive
       opmode = (opcode >> 6) & 0x07
       mode = (opcode >> 3) & 0x07
       ea_reg = opcode & 0x07
-      raise NotImplementedError, "M68K #{operation.upcase} opmode #{opmode}" unless [0, 1, 2, 4, 5, 6].include?(opmode)
+      raise NotImplementedError, "M68K #{operation.upcase} opmode #{opmode}" unless [0, 1, 2, 4, 5, 6, 7].include?(opmode)
 
       size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
       if opmode < 4
@@ -346,13 +405,81 @@ module MegaDrive
         result = operation == :and ? left & right : left | right
         write_data_register(reg, size, result)
       else
-        left = read_ea(mode, ea_reg, size)
         right = @d[reg]
-        result = operation == :and ? left & right : left | right
-        write_ea(mode, ea_reg, size, result)
+        left, result = mutate_ea(mode, ea_reg, size) { |value| operation == :and ? value & right : value | right }
       end
       set_nz_flags(result, size, keep_x: true)
       finish(size == SIZE_LONG ? 8 : 4)
+    end
+
+    def divide(opcode, signed:)
+      reg = (opcode >> 9) & 0x07
+      mode = (opcode >> 3) & 0x07
+      ea_reg = opcode & 0x07
+      divisor = read_ea(mode, ea_reg, SIZE_WORD)
+      divisor = sign_extend(divisor, 16) if signed
+      dividend = @d[reg] & 0xFFFF_FFFF
+      dividend = sign_extend(dividend, 32) if signed
+
+      raise NotImplementedError, 'M68K divide by zero' if divisor.zero?
+
+      if signed
+        quotient_negative = dividend.negative? ^ divisor.negative?
+        quotient = dividend.abs / divisor.abs
+        quotient = -quotient if quotient_negative
+        remainder = dividend - quotient * divisor
+        overflow = quotient < -0x8000 || quotient > 0x7FFF
+      else
+        quotient = dividend / divisor
+        remainder = dividend % divisor
+        overflow = quotient > 0xFFFF
+      end
+
+      @ccr &= FLAG_X
+      if overflow
+        @ccr |= FLAG_V
+      else
+        write_data_register(reg, SIZE_LONG, ((remainder & 0xFFFF) << 16) | (quotient & 0xFFFF))
+        @ccr |= FLAG_Z if (quotient & 0xFFFF).zero?
+        @ccr |= FLAG_N if signed && (quotient & 0x8000) != 0
+      end
+      finish(140)
+    end
+
+    def multiply(opcode, signed:)
+      reg = (opcode >> 9) & 0x07
+      mode = (opcode >> 3) & 0x07
+      ea_reg = opcode & 0x07
+      source = read_ea(mode, ea_reg, SIZE_WORD)
+      left = signed ? sign_extend(@d[reg] & 0xFFFF, 16) : (@d[reg] & 0xFFFF)
+      right = signed ? sign_extend(source, 16) : source
+      result = (left * right) & 0xFFFF_FFFF
+      write_data_register(reg, SIZE_LONG, result)
+      @ccr &= FLAG_X
+      @ccr |= FLAG_Z if result.zero?
+      @ccr |= FLAG_N if (result & 0x8000_0000) != 0
+      finish(70)
+    end
+
+    def exg(opcode)
+      rx = (opcode >> 9) & 0x07
+      ry = opcode & 0x07
+      mode = (opcode >> 3) & 0x1F
+      case mode
+      when 0x08
+        @d[rx], @d[ry] = @d[ry], @d[rx]
+      when 0x09
+        left = read_address_register(rx)
+        right = read_address_register(ry)
+        write_address_register(rx, right)
+        write_address_register(ry, left)
+      when 0x11
+        left = @d[rx]
+        right = read_address_register(ry)
+        @d[rx] = right
+        write_address_register(ry, left)
+      end
+      finish(6)
     end
 
     def cmp(opcode)
@@ -374,9 +501,7 @@ module MegaDrive
         set_add_sub_flags(left, right, left - right, size, subtract: true)
       else
         size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
-        left = read_ea(mode, ea_reg, size)
-        result = left ^ @d[reg]
-        write_ea(mode, ea_reg, size, result)
+        left, result = mutate_ea(mode, ea_reg, size) { |value| value ^ @d[reg] }
         set_nz_flags(result, size, keep_x: true)
       end
       finish(4)
@@ -396,20 +521,20 @@ module MegaDrive
         return finish(20)
       end
 
-      left = read_ea(mode, reg, size)
-      result = case operation
-               when 0x0000 then left | immediate
-               when 0x0200 then left & immediate
-               when 0x0400 then left - immediate
-               when 0x0600 then left + immediate
-               when 0x0A00 then left ^ immediate
-               when 0x0C00 then left - immediate
-               end
-
       if operation == 0x0C00
+        left = read_ea(mode, reg, size)
+        result = left - immediate
         set_add_sub_flags(left, immediate, result, size, subtract: true)
       else
-        write_ea(mode, reg, size, result)
+        left, result = mutate_ea(mode, reg, size) do |value|
+          case operation
+          when 0x0000 then value | immediate
+          when 0x0200 then value & immediate
+          when 0x0400 then value - immediate
+          when 0x0600 then value + immediate
+          when 0x0A00 then value ^ immediate
+          end
+        end
         if operation == 0x0400 || operation == 0x0600
           set_add_sub_flags(left, immediate, result, size, subtract: operation == 0x0400)
         else
@@ -687,6 +812,48 @@ module MegaDrive
       else
         raise NotImplementedError, "M68K EA mode #{mode}/#{reg}"
       end
+    end
+
+    def writable_memory_ea_address(mode, reg, size)
+      case mode
+      when 2
+        read_address_register(reg)
+      when 3
+        address = read_address_register(reg)
+        write_address_register(reg, address + increment_step(size, reg))
+        address
+      when 4
+        address = read_address_register(reg) - increment_step(size, reg)
+        write_address_register(reg, address)
+        address
+      when 5
+        (read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+      when 6
+        address_index_address(reg)
+      when 7
+        case reg
+        when 0 then sign_extend(fetch_word, 16) & ADDRESS_MASK
+        when 1 then fetch_long
+        else
+          raise NotImplementedError, "M68K writable EA mode 7/#{reg}"
+        end
+      else
+        raise NotImplementedError, "M68K writable EA mode #{mode}/#{reg}"
+      end
+    end
+
+    def mutate_ea(mode, reg, size)
+      if mode == 0 || mode == 1
+        old = read_ea(mode, reg, size)
+        result = yield(old)
+        write_ea(mode, reg, size, result)
+      else
+        address = writable_memory_ea_address(mode, reg, size)
+        old = read_sized(address, size)
+        result = yield(old)
+        write_sized(address, size, result)
+      end
+      [old, result]
     end
 
     def read_address_register(reg)

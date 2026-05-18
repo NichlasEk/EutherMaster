@@ -253,6 +253,54 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_c?).to be false
   end
 
+  it 'executes signed and unsigned division' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x85FC, 0x0068, # DIVS.W #$0068,D2
+      0x80FC, 0x000A  # DIVU.W #$000A,D0
+    ])
+    cpu.instance_variable_get(:@d)[2] = 0xFFFF_FF30
+    cpu.instance_variable_get(:@d)[0] = 123
+
+    2.times { cpu.step }
+
+    expect(cpu.d[2]).to eq(0x0000_FFFE)
+    expect(cpu.d[0]).to eq(0x0003_000C)
+  end
+
+  it 'executes signed and unsigned multiplication' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x303C, 0x0006, # MOVE.W #6,D0
+      0x323C, 0xFFFE, # MOVE.W #-2,D1
+      0xC0C1,         # MULU.W D1,D0
+      0xC3C0          # MULS.W D0,D1
+    ])
+
+    4.times { cpu.step }
+
+    expect(cpu.d[0]).to eq(0x0005_FFF4)
+    expect(cpu.d[1]).to eq(0x0000_0018)
+  end
+
+  it 'exchanges data and address registers' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x203C, 0x1111, 0x2222, # MOVE.L #$11112222,D0
+      0x223C, 0x3333, 0x4444, # MOVE.L #$33334444,D1
+      0x243C, 0x5555, 0x6666, # MOVE.L #$55556666,D2
+      0xC141,                 # EXG D0,D1
+      0xC58F                  # EXG D2,A7
+    ])
+
+    5.times { cpu.step }
+
+    expect(cpu.d[0]).to eq(0x3333_4444)
+    expect(cpu.d[1]).to eq(0x1111_2222)
+    expect(cpu.d[2]).to eq(0x00FF_0000)
+    expect(cpu.ssp).to eq(0x5555_6666)
+  end
+
   it 'executes DBcc loops' do
     reset_to(0x100)
     load_program(0x100, [
@@ -284,6 +332,36 @@ RSpec.describe MegaDrive::M68K do
 
     expect(cpu.flag_z?).to be false
     expect(bus.read_byte(0x200)).to eq(0)
+  end
+
+  it 'does not consume absolute destination extensions twice for bit memory writes' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x08F8, 0x0003, 0x2000, # BSET #3,($2000).W
+      0x4E71                  # NOP
+    ])
+
+    cpu.step
+
+    expect(cpu.pc).to eq(0x106)
+    expect(bus.read_byte(0x2000)).to eq(0x08)
+    expect(bus.read_word(cpu.pc)).to eq(0x4E71)
+  end
+
+  it 'does not consume absolute destination extensions twice for arithmetic memory writes' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x203C, 0x0000, 0x0002, # MOVE.L #2,D0
+      0xD1B8, 0x2000,         # ADD.L D0,($2000).W
+      0x4E71                  # NOP
+    ])
+    bus.write_long(0x2000, 3)
+
+    2.times { cpu.step }
+
+    expect(cpu.pc).to eq(0x10A)
+    expect(bus.read_long(0x2000)).to eq(5)
+    expect(bus.read_word(cpu.pc)).to eq(0x4E71)
   end
 
   it 'moves immediate values into SR' do
@@ -324,6 +402,20 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_x?).to be true
   end
 
+  it 'negates operands with NEG' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x7E02, # MOVEQ #2,D7
+      0x4447  # NEG.W D7
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.d[7] & 0xFFFF).to eq(0xFFFE)
+    expect(cpu.flag_n?).to be true
+    expect(cpu.flag_c?).to be true
+  end
+
   it 'inverts operands with NOT' do
     reset_to(0x100)
     load_program(0x100, [
@@ -351,6 +443,25 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_z?).to be true
   end
 
+  it 'executes register rotates without treating them as shifts' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x103C, 0x0081, # MOVE.B #$81,D0
+      0xE318,         # ROL.B #1,D0
+      0xE210          # ROXR.B #1,D0
+    ])
+    cpu.sr = cpu.sr | MegaDrive::M68K::FLAG_X
+
+    2.times { cpu.step }
+    expect(cpu.d[0] & 0xFF).to eq(0x03)
+    expect(cpu.flag_c?).to be true
+    expect(cpu.flag_x?).to be true
+
+    cpu.step
+    expect(cpu.d[0] & 0xFF).to eq(0x81)
+    expect(cpu.flag_c?).to be true
+  end
+
   it 'handles address-register indexed effective addresses' do
     reset_to(0x100)
     load_program(0x100, [
@@ -371,13 +482,15 @@ RSpec.describe MegaDrive::M68K do
       0x740F, # MOVEQ #$0F,D2
       0x7803, # MOVEQ #$03,D4
       0x8882, # OR.L D2,D4
+      0x8F82, # OR.L D7,D2
       0xC482  # AND.L D2,D2
     ])
+    cpu.instance_variable_get(:@d)[7] = 0xF0
 
-    4.times { cpu.step }
+    5.times { cpu.step }
 
     expect(cpu.d[4]).to eq(0x0F)
-    expect(cpu.d[2]).to eq(0x0F)
+    expect(cpu.d[2]).to eq(0xFF)
     expect(cpu.flag_z?).to be false
   end
 

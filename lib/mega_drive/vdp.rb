@@ -1,13 +1,14 @@
 module MegaDrive
   class VDP
-    SMS_WIDTH = 256
-    SMS_HEIGHT = 192
+    DEFAULT_WIDTH = 256
+    DEFAULT_HEIGHT = 224
     VRAM_SIZE = 0x1_0000
     CRAM_SIZE = 0x40
     VSRAM_SIZE = 0x40
     NUM_REGISTERS = 0x20
 
-    attr_reader :registers, :vram, :cram, :vsram, :framebuffer, :render_version
+    attr_reader :registers, :vram, :cram, :vsram, :framebuffer, :render_version,
+                :screen_width, :screen_height
     attr_accessor :irq_level, :bus
 
     def initialize
@@ -15,17 +16,23 @@ module MegaDrive
       @vram = Array.new(VRAM_SIZE, 0)
       @cram = Array.new(CRAM_SIZE, 0)
       @vsram = Array.new(VSRAM_SIZE, 0)
-      @framebuffer = Array.new(SMS_WIDTH * SMS_HEIGHT, 0)
+      @screen_width = DEFAULT_WIDTH
+      @screen_height = DEFAULT_HEIGHT
+      @framebuffer = Array.new(@screen_width * @screen_height, 0)
       @control_pending = false
       @control_latch = 0
       @address = 0
       @mode_write = false
       @location_bits = 0
+      @code = 0
       @dma_active = false
       @status = 0x3400
       @irq_level = 0
       @render_version = 0
       @video_dirty = true
+      @palette_version = -1
+      @palette_rgba = nil
+      @sharp_palette_rgba = nil
     end
 
     def reset
@@ -33,22 +40,35 @@ module MegaDrive
       @vram.fill(0)
       @cram.fill(0)
       @vsram.fill(0)
-      @framebuffer.fill(0)
+      @screen_width = DEFAULT_WIDTH
+      @screen_height = DEFAULT_HEIGHT
+      @framebuffer = Array.new(@screen_width * @screen_height, 0)
       @control_pending = false
       @control_latch = 0
       @address = 0
       @mode_write = false
       @location_bits = 0
+      @code = 0
       @dma_active = false
       @status = 0x3400
       @irq_level = 0
       @render_version = 0
       @video_dirty = true
+      @palette_version = -1
+      @palette_rgba = nil
+      @sharp_palette_rgba = nil
     end
 
     def read_data
       @control_pending = false
-      word = read_vram_word(@address)
+      word = case memory_target
+             when :cram
+               @cram[(@address >> 1) & (CRAM_SIZE - 1)] || 0
+             when :vsram
+               @vsram[(@address >> 1) & (VSRAM_SIZE - 1)] || 0
+             else
+               read_vram_word(@address)
+             end
       increment_address
       word
     end
@@ -62,13 +82,22 @@ module MegaDrive
       @control_pending = false
       value &= 0xFFFF
 
+      if @dma_active && dma_mode == 0x80
+        perform_vram_fill(value)
+        return
+      end
+
       case memory_target
       when :cram
         index = (@address >> 1) & (CRAM_SIZE - 1)
+        value &= 0x0FFF
         @video_dirty = true if @cram[index] != value
         @cram[index] = value
+        @palette_version = -1
       when :vsram
         index = (@address >> 1) & (VSRAM_SIZE - 1)
+        value &= 0x07FF
+        @video_dirty = true if @vsram[index] != value
         @vsram[index] = value
       else
         write_vram_word(@address, value)
@@ -77,35 +106,45 @@ module MegaDrive
       increment_address
     end
 
+    def write_data_byte(address, value)
+      write_data((value & 0xFF) * 0x0101)
+    end
+
     def write_control(value)
       value &= 0xFFFF
 
-      if (value & 0xC000) == 0x8000
-        register = (value >> 8) & 0x1F
-        data = value & 0xFF
-        @video_dirty = true if @registers[register] != data
-        @registers[register] = data
-        @control_pending = false
-        return
-      end
-
       if @control_pending
         @address = (@control_latch & 0x3FFF) | ((value & 0x0007) << 14)
-        @location_bits = (@location_bits & 0x01) | ((value >> 3) & 0x06)
+        @code = (@code & ~0x3C) | ((value >> 2) & 0x3C)
+        @location_bits = @code & 0x0F
         @dma_active = dma_enabled? && (value & 0x0080) != 0
         @control_pending = false
         perform_dma if @dma_active
       else
         @control_latch = value
         @address = (@address & 0x1C000) | (value & 0x3FFF)
-        @mode_write = (value & 0x4000) != 0
-        @location_bits = (@location_bits & 0x06) | ((value >> 15) & 0x01)
-        @control_pending = true
+        @code = (@code & 0x3C) | ((value >> 14) & 0x03)
+        @location_bits = @code & 0x0F
+
+        if (value & 0xC000) == 0x8000
+          register = (value >> 8) & 0x1F
+          data = value & 0xFF
+          @video_dirty = true if @registers[register] != data
+          @registers[register] = data
+          @control_pending = false
+        else
+          @mode_write = (value & 0x4000) != 0
+          @control_pending = true
+        end
       end
     end
 
+    def write_control_byte(address, value)
+      write_control((value & 0xFF) * 0x0101)
+    end
+
     def render_frame
-      draw_scroll_planes if @video_dirty
+      draw_scroll_planes
     end
 
     def request_vblank!
@@ -118,13 +157,44 @@ module MegaDrive
       @status &= ~0x0080
     end
 
+    def palette_rgba
+      rebuild_palettes if @palette_version != @render_version || !@palette_rgba
+      @palette_rgba
+    end
+
+    def sharp_palette_rgba
+      rebuild_palettes if @palette_version != @render_version || !@sharp_palette_rgba
+      @sharp_palette_rgba
+    end
+
     private
+
+    def rebuild_palettes
+      @palette_rgba = Array.new(CRAM_SIZE) { |index| md_color_rgba(@cram[index] || 0) }
+      @sharp_palette_rgba = Array.new(CRAM_SIZE) do |index|
+        rgba = @palette_rgba[index].bytes
+        [sharp_channel(rgba[0]), sharp_channel(rgba[1]), sharp_channel(rgba[2]), 255].pack('C4')
+      end
+      @palette_version = @render_version
+    end
+
+    def md_color_rgba(value)
+      r = ((value >> 1) & 0x07) * 36
+      g = ((value >> 5) & 0x07) * 36
+      b = ((value >> 9) & 0x07) * 36
+      [r, g, b, 255].pack('C4')
+    end
+
+    def sharp_channel(value)
+      value = 127.5 + (value - 127.5) * 1.35
+      value.round.clamp(0, 255)
+    end
 
     def memory_target
       case @location_bits
-      when 0x00 then :vram
-      when 0x01 then @mode_write ? :cram : :invalid
-      when 0x02 then :vsram
+      when 0x00, 0x01 then :vram
+      when 0x03 then :cram
+      when 0x05 then :vsram
       else :invalid
       end
     end
@@ -149,19 +219,84 @@ module MegaDrive
     end
 
     def perform_dma
-      return unless @bus && dma_mode < 0x80
+      return unless @bus
+      return perform_vram_copy if dma_mode == 0xC0
+      return unless dma_mode < 0x80
 
       source = dma_source_address
-      dma_length.times do
+      length = dma_length
+      length.times do
         write_data(@bus.read_word(source))
-        source = (source + 2) & 0xFF_FFFE
+        increment_dma_source_address
+        decrement_dma_length
+        source = dma_source_address
       end
       @dma_active = false
     end
 
+    def perform_vram_fill(value)
+      byte = (value >> 8) & 0xFF
+      dma_length.times do
+        write_memory_byte((@address ^ 1) & 0xFFFF, byte)
+        increment_dma_source_address
+        increment_address
+      end
+      @dma_active = false
+    end
+
+    def perform_vram_copy
+      source = dma_source_address
+      dma_length.times do
+        write_vram_word(@address, read_vram_word(source & 0xFFFF))
+        increment_dma_source_address
+        source = (source + 2) & 0xFFFF
+        increment_address
+      end
+      @dma_active = false
+    end
+
+    def increment_dma_source_address
+      source = dma_source_address
+      source = (source & ~0x1FFFF) | ((source + 2) & 0x1FFFF)
+      @registers[21] = (source >> 1) & 0xFF
+      @registers[22] = (source >> 9) & 0xFF
+      @registers[23] = (@registers[23] & 0xC0) | ((source >> 17) & 0x3F)
+    end
+
+    def decrement_dma_length
+      length = (((@registers[20] << 8) | @registers[19]) - 1) & 0xFFFF
+      @registers[19] = length & 0xFF
+      @registers[20] = (length >> 8) & 0xFF
+    end
+
+    def write_memory_byte(address, byte)
+      byte &= 0xFF
+      case memory_target
+      when :cram
+        index = (address >> 1) & (CRAM_SIZE - 1)
+        old = @cram[index] || 0
+        value = address.even? ? ((byte << 8) | (old & 0x00FF)) : ((old & 0xFF00) | byte)
+        value &= 0x0FFF
+        @video_dirty = true if @cram[index] != value
+        @cram[index] = value
+        @palette_version = -1
+      when :vsram
+        index = (address >> 1) & (VSRAM_SIZE - 1)
+        old = @vsram[index] || 0
+        value = address.even? ? ((byte << 8) | (old & 0x00FF)) : ((old & 0xFF00) | byte)
+        value &= 0x07FF
+        @video_dirty = true if @vsram[index] != value
+        @vsram[index] = value
+      else
+        address &= 0xFFFF
+        @video_dirty = true if @vram[address] != byte
+        @vram[address] = byte
+      end
+    end
+
     def read_vram_word(address)
       high = @vram[address & 0xFFFF] || 0
-      low = @vram[(address + 1) & 0xFFFF] || 0
+      low = @vram[(address ^ 1) & 0xFFFF] || 0
       ((high << 8) | low) & 0xFFFF
     end
 
@@ -169,9 +304,10 @@ module MegaDrive
       address &= 0xFFFF
       high = (value >> 8) & 0xFF
       low = value & 0xFF
-      @video_dirty = true if @vram[address] != high || @vram[(address + 1) & 0xFFFF] != low
+      low_address = (address ^ 1) & 0xFFFF
+      @video_dirty = true if @vram[address] != high || @vram[low_address] != low
       @vram[address] = high
-      @vram[(address + 1) & 0xFFFF] = low
+      @vram[low_address] = low
     end
 
     def increment_address
@@ -181,46 +317,104 @@ module MegaDrive
     end
 
     def draw_scroll_planes
+      ensure_framebuffer_size
       backdrop = color_index(@registers[7] & 0x3F)
       @framebuffer.fill(backdrop)
-      drew = false
+      drew = !display_enabled?
 
-      h_scroll_a, h_scroll_b, v_scroll_a, v_scroll_b = scroll_values
-      drew |= draw_plane(plane_b_base, h_scroll_b, v_scroll_b)
-      drew |= draw_plane(plane_a_base, h_scroll_a, v_scroll_a)
+      if display_enabled?
+        prepare_render_cache
+        sprites = sprite_pixels
+        height = @screen_height
+        width = @screen_width
+        height.times do |screen_y|
+          source_y = @source_y_cache[screen_y]
+          row_offset = screen_y * width
+          width.times do |screen_x|
+            source_x = @source_x_cache[screen_x]
+            scroll_b = plane_pixel(:b, source_x, source_y)
+            scroll_a = window_pixel(source_x, source_y) || plane_pixel(:a, source_x, source_y)
+            sprite = sprites[row_offset + screen_x]
+            pixel = resolve_pixel(sprite, scroll_a, scroll_b)
+            next unless pixel
+
+            @framebuffer[row_offset + screen_x] = pixel & 0x3F
+            drew = true
+          end
+        end
+      end
+
       draw_vram_activity_frame unless drew
 
       @video_dirty = false
       @render_version += 1
     end
 
-    def draw_plane(nametable_base, h_scroll, v_scroll)
-      return false if nametable_base.zero?
+    def plane_pixel(plane, source_x, source_y)
+      nametable_base = plane == :a ? plane_a_base : plane_b_base
 
-      width_cells, height_cells = plane_dimensions
-      drew = false
+      h_scroll = plane == :a ? @h_scroll_a_cache[source_y] : @h_scroll_b_cache[source_y]
+      v_scroll = plane == :a ? @v_scroll_a_cache[source_x / 16] : @v_scroll_b_cache[source_x / 16]
+      width_cells, height_cells = @plane_dimensions_cache
+      scrolled_y = (source_y + v_scroll) % (height_cells * 8)
+      scrolled_x = (source_x - h_scroll) % (width_cells * 8)
+      cell_y = scrolled_y / 8
+      cell_x = scrolled_x / 8
+      entry = read_name_table_word(nametable_base, width_cells, cell_y, cell_x)
+      pixel = tile_pixel(entry, scrolled_y & 7, scrolled_x & 7)
+      encode_pixel(entry, pixel)
+    end
 
-      SMS_HEIGHT.times do |screen_y|
-        scrolled_y = (screen_y + v_scroll) % (height_cells * 8)
-        cell_y = scrolled_y / 8
-        row_in_tile = scrolled_y & 7
-        SMS_WIDTH.times do |screen_x|
-          scrolled_x = (screen_x - h_scroll) % (width_cells * 8)
-          cell_x = scrolled_x / 8
-          column_in_tile = scrolled_x & 7
-          entry = read_vram_word(nametable_base + ((cell_y * width_cells + cell_x) * 2))
-          pixel = tile_pixel(entry, row_in_tile, column_in_tile)
-          next if pixel.zero?
+    def window_pixel(source_x, source_y)
+      range = @window_range_cache[source_y]
+      return nil unless range && source_x >= range[0] && source_x < range[1]
 
-          @framebuffer[screen_y * SMS_WIDTH + screen_x] = color_index(((entry >> 9) & 0x30) | pixel)
-          drew = true
+      h_cell = source_x / 8
+      v_cell = source_y / 8
+      entry = read_name_table_word(window_base, window_width_cells, v_cell, h_cell)
+      pixel = tile_pixel(entry, source_y & 7, source_x & 7)
+      encode_pixel(entry, pixel)
+    end
+
+    def resolve_pixel(sprite, scroll_a, scroll_b)
+      sprite_priority = sprite && (sprite & 0x100) != 0
+      a_priority = scroll_a && (scroll_a & 0x100) != 0
+      b_priority = scroll_b && (scroll_b & 0x100) != 0
+
+      if sprite_priority
+        if a_priority || !b_priority
+          return sprite if sprite && (sprite & 0x0F) != 0
+          return scroll_a if scroll_a && (scroll_a & 0x0F) != 0
+          return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
+        else
+          return sprite if sprite && (sprite & 0x0F) != 0
+          return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
+          return scroll_a if scroll_a && (scroll_a & 0x0F) != 0
         end
+      elsif a_priority
+        return scroll_a if scroll_a && (scroll_a & 0x0F) != 0
+        if b_priority
+          return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
+          return sprite if sprite && (sprite & 0x0F) != 0
+        else
+          return sprite if sprite && (sprite & 0x0F) != 0
+          return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
+        end
+      elsif b_priority
+        return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
+        return sprite if sprite && (sprite & 0x0F) != 0
+        return scroll_a if scroll_a && (scroll_a & 0x0F) != 0
+      else
+        return sprite if sprite && (sprite & 0x0F) != 0
+        return scroll_a if scroll_a && (scroll_a & 0x0F) != 0
+        return scroll_b if scroll_b && (scroll_b & 0x0F) != 0
       end
 
-      drew
+      nil
     end
 
     def draw_vram_activity_frame
+      width = @screen_width
       @vram.each_with_index do |byte, index|
         next if byte.zero?
 
@@ -228,8 +422,63 @@ module MegaDrive
         color = ((byte >> 2) ^ (index >> 5)) & 0x3F
         color = 1 if color.zero?
         @framebuffer[pixel] = color
-        @framebuffer[pixel + 1] = color if (pixel % SMS_WIDTH) < SMS_WIDTH - 1
-        @framebuffer[pixel + SMS_WIDTH] = color if pixel + SMS_WIDTH < @framebuffer.length
+        @framebuffer[pixel + 1] = color if (pixel % width) < width - 1
+        @framebuffer[pixel + width] = color if pixel + width < @framebuffer.length
+      end
+    end
+
+    def sprite_pixels
+      pixels = Array.new(@screen_width * @screen_height)
+      base = sprite_table_base
+      sprite = 0
+      80.times do
+        address = base + sprite * 8
+        y = read_vram_word(address) & 0x03FF
+        size_link = read_vram_word(address + 2)
+        attr = read_vram_word(address + 4)
+        x = read_vram_word(address + 6) & 0x01FF
+        h_cells = (((size_link >> 10) & 0x03) + 1)
+        v_cells = (((size_link >> 8) & 0x03) + 1)
+        link = size_link & 0x7F
+        draw_sprite(pixels, x - 0x80, y - 0x80, h_cells, v_cells, attr)
+        break if link.zero? || link == sprite
+
+        sprite = link
+      end
+      pixels
+    end
+
+    def draw_sprite(target, screen_x, screen_y, h_cells, v_cells, attr)
+      pattern = attr & 0x07FF
+      h_flip = (attr & 0x0800) != 0
+      v_flip = (attr & 0x1000) != 0
+      palette = (attr >> 9) & 0x30
+      priority = (attr & 0x8000) != 0
+
+      (v_cells * 8).times do |sy|
+        y = screen_y + sy
+        next if y.negative? || y >= @screen_height
+
+        tile_y = sy / 8
+        row = sy & 7
+        tile_y = v_cells - 1 - tile_y if v_flip
+        row = 7 - row if v_flip
+
+        (h_cells * 8).times do |sx|
+          x = screen_x + sx
+          next if x.negative? || x >= @screen_width
+
+          tile_x = sx / 8
+          col = sx & 7
+          tile_x = h_cells - 1 - tile_x if h_flip
+          col = 7 - col if h_flip
+          tile = pattern + tile_x * v_cells + tile_y
+          pixel = pattern_pixel(tile, row, col)
+          next if pixel.zero?
+
+          index = y * @screen_width + x
+          target[index] ||= encode_raw_pixel(palette | pixel, priority)
+        end
       end
     end
 
@@ -237,16 +486,95 @@ module MegaDrive
       pattern = entry & 0x07FF
       row = 7 - row if (entry & 0x1000) != 0
       column = 7 - column if (entry & 0x0800) != 0
-      address = (pattern * 32 + row * 4 + column / 2) & 0xFFFF
-      byte = @vram[address] || 0
-      column.even? ? (byte >> 4) & 0x0F : byte & 0x0F
+      pattern_row(pattern, row)[column]
+    end
+
+    def pattern_pixel(pattern, row, column)
+      pattern_row(pattern, row)[column]
+    end
+
+    def pattern_row(pattern, row)
+      key = (pattern << 3) | row
+      cached = @pattern_row_cache[key]
+      return cached if cached
+
+      address = (pattern * 32 + row * 4) & 0xFFFF
+      b0 = @vram[address] || 0
+      b1 = @vram[(address + 1) & 0xFFFF] || 0
+      b2 = @vram[(address + 2) & 0xFFFF] || 0
+      b3 = @vram[(address + 3) & 0xFFFF] || 0
+      @pattern_row_cache[key] = [
+        (b0 >> 4) & 0x0F, b0 & 0x0F,
+        (b1 >> 4) & 0x0F, b1 & 0x0F,
+        (b2 >> 4) & 0x0F, b2 & 0x0F,
+        (b3 >> 4) & 0x0F, b3 & 0x0F
+      ]
     end
 
     def color_index(cram_index)
-      cram_value = @cram[cram_index & (CRAM_SIZE - 1)] || 0
-      return md_color_to_sms_index(cram_value) unless cram_value.zero?
-
       cram_index & 0x3F
+    end
+
+    def prepare_render_cache
+      width = active_width
+      height = active_height
+      @source_x_cache = source_cache(@source_x_cache, @screen_width, width)
+      @source_y_cache = source_cache(@source_y_cache, @screen_height, height)
+      @plane_dimensions_cache = plane_dimensions
+      @h_scroll_a_cache = Array.new(height) { |y| h_scroll_value(:a, y) }
+      @h_scroll_b_cache = Array.new(height) { |y| h_scroll_value(:b, y) }
+      columns = (width + 15) / 16
+      @v_scroll_a_cache = Array.new(columns) { |column| v_scroll_value_for_column(:a, column) }
+      @v_scroll_b_cache = Array.new(columns) { |column| v_scroll_value_for_column(:b, column) }
+      @window_range_cache = Array.new(height) { |y| window_range(y) }
+      @pattern_row_cache = {}
+    end
+
+    def source_cache(cache, output_size, input_size)
+      return cache if cache&.length == output_size && cache.instance_variable_get(:@input_size) == input_size
+
+      values = Array.new(output_size) { |index| index * input_size / output_size }
+      values.instance_variable_set(:@input_size, input_size)
+      values
+    end
+
+    def ensure_framebuffer_size
+      width = active_width
+      height = active_height
+      return if @screen_width == width && @screen_height == height && @framebuffer.length == width * height
+
+      @screen_width = width
+      @screen_height = height
+      @framebuffer = Array.new(width * height, 0)
+      @source_x_cache = nil
+      @source_y_cache = nil
+    end
+
+    def encode_pixel(entry, color_id)
+      return nil if color_id.zero?
+
+      encode_raw_pixel(((entry >> 9) & 0x30) | color_id, (entry & 0x8000) != 0)
+    end
+
+    def encode_raw_pixel(cram_index, priority)
+      (priority ? 0x100 : 0) | (cram_index & 0x3F)
+    end
+
+    def encoded_color(pixel)
+      pixel & 0x3F
+    end
+
+    def pixel_color_id(pixel)
+      pixel ? (pixel & 0x0F) : 0
+    end
+
+    def pixel_priority(pixel)
+      pixel ? (pixel & 0x100) != 0 : false
+    end
+
+    def read_name_table_word(base, width_cells, row, column)
+      relative = (2 * (row * width_cells + column)) & 0x1FFF
+      read_vram_word(base + relative)
     end
 
     def plane_dimensions
@@ -272,19 +600,81 @@ module MegaDrive
       [h_scroll_a, h_scroll_b, v_scroll_a, v_scroll_b]
     end
 
+    def h_scroll_value(plane, source_y)
+      hscroll_base = (@registers[13] & 0x3F) << 10
+      line = source_y & 0xFF
+      offset = case @registers[11] & 0x03
+               when 0 then 0
+               when 2 then 32 * (line / 8)
+               when 3 then 4 * line
+               else 4 * (line & 0x07)
+               end
+      read_vram_word(hscroll_base + offset + (plane == :a ? 0 : 2)) & 0x03FF
+    end
+
+    def v_scroll_value(plane, source_x)
+      v_scroll_value_for_column(plane, source_x / 16)
+    end
+
+    def v_scroll_value_for_column(plane, column)
+      if (@registers[11] & 0x04).zero?
+        return (@vsram[plane == :a ? 0 : 1] || 0) & 0x03FF
+      end
+
+      index = column * 2 + (plane == :a ? 0 : 1)
+      (@vsram[index] || 0) & 0x03FF
+    end
+
     def plane_a_base
       (@registers[2] & 0x38) << 10
+    end
+
+    def window_base
+      base = (@registers[3] & 0x3E) << 10
+      active_width == 320 ? (base & 0xF000) : (base & 0xF800)
     end
 
     def plane_b_base
       (@registers[4] & 0x07) << 13
     end
 
-    def md_color_to_sms_index(value)
-      r = value & 0x00E
-      g = (value >> 4) & 0x00E
-      b = (value >> 8) & 0x00E
-      ((r >> 1) | ((g >> 1) << 2) | ((b >> 1) << 4)) & 0x3F
+    def sprite_table_base
+      base = (@registers[5] & 0x7F) << 9
+      active_width == 320 ? (base & 0xFC00) : base
     end
+
+    def active_width
+      ((@registers[12] & 0x81) != 0) ? 320 : 256
+    end
+
+    def active_height
+      224
+    end
+
+    def display_enabled?
+      (@registers[1] & 0x40) != 0
+    end
+
+    def window_width_cells
+      active_width == 320 ? 64 : 32
+    end
+
+    def window_range(source_y)
+      x = (@registers[17] & 0x1F) * 16
+      y = @registers[18] & 0x1F
+      in_vertical = if (@registers[18] & 0x80) != 0
+                      (source_y / 8) >= y
+                    else
+                      (source_y / 8) < y
+                    end
+      return [0, active_width] if in_vertical
+
+      if (@registers[17] & 0x80) != 0
+        [x, active_width]
+      else
+        [0, x]
+      end
+    end
+
   end
 end

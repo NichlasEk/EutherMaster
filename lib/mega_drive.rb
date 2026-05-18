@@ -1,5 +1,6 @@
 require_relative 'mega_drive/m68k'
 require_relative 'mega_drive/m68k_bus'
+require_relative 'mega_drive/controller'
 require_relative 'mega_drive/psg'
 require_relative 'mega_drive/ym2612'
 require_relative 'mega_drive/audio'
