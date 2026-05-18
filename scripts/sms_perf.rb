@@ -82,7 +82,9 @@ if audio_render
   puts "Avg audio render: %.2f ms" % ((audio_seconds / frames) * 1000.0)
   puts "Audio render realtime: %.1fx" % ((audio_samples.to_f / AstralVerse::PsgPlayer::SAMPLE_RATE) / audio_seconds)
 end
-puts "PC: %04X  SP: %04X  Cycles: %d" % [stone.emulator.cpu.pc, stone.emulator.cpu.sp, stone.emulator.cpu.total_cycles]
+cpu = stone.emulator.cpu
+stack_pointer = cpu.respond_to?(:sp) ? cpu.sp : cpu.a[7]
+puts "PC: %04X  SP: %04X  Cycles: %d" % [cpu.pc, stack_pointer, cpu.total_cycles]
 puts "VDP regs: #{stone.emulator.vdp.registers.map { |value| '%02X' % value }.join(' ')}"
 puts "Pixels: #{stone.vision_sprite.scrying_pool.uniq.first(16).map { |value| '%02X' % value }.join(',')}"
 

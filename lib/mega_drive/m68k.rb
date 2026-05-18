@@ -798,6 +798,11 @@ module MegaDrive
       end
 
       if condition_true?(condition)
+        if counter_tst_busy_wait?(displacement, target)
+          coalesce_counter_tst_busy_wait(target)
+          @pc = target
+          return finish(BUSY_WAIT_BRANCH_CYCLES)
+        end
         @pc = target
         finish(short_tst_busy_wait?(displacement, target) ? BUSY_WAIT_BRANCH_CYCLES : 10)
       else
@@ -810,6 +815,18 @@ module MegaDrive
         (displacement == 0xF8 && read_word(target) == 0x4A39)
     end
 
+    def counter_tst_busy_wait?(displacement, target)
+      displacement == 0xF2 &&
+        read_word(target) == 0x5239 &&
+        read_word(target + 6) == 0x4A39
+    end
+
+    def coalesce_counter_tst_busy_wait(target)
+      counter_address = read_long(target + 2)
+      iterations = BUSY_WAIT_BRANCH_CYCLES / 20
+      write_byte(counter_address, read_byte(counter_address) + iterations)
+    end
+
     def dbcc(opcode)
       condition = (opcode >> 8) & 0x0F
       reg = opcode & 0x07
@@ -820,6 +837,12 @@ module MegaDrive
       counter = ((@d[reg] & 0xFFFF) - 1) & 0xFFFF
       @d[reg] = (@d[reg] & 0xFFFF_0000) | counter
       if counter != 0xFFFF
+        if displacement == -2
+          iterations = [counter + 1, BUSY_WAIT_BRANCH_CYCLES / 10].min
+          @d[reg] = (@d[reg] & 0xFFFF_0000) | ((counter - iterations + 1) & 0xFFFF)
+          @pc = displacement_base - 2
+          return finish(iterations * 10)
+        end
         @pc = (displacement_base + displacement) & ADDRESS_MASK
         finish(10)
       else

@@ -150,6 +150,24 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.cycles).to eq(MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES)
   end
 
+  it 'coalesces counted absolute-long TST busy-wait branches' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x5239, 0x00FF, 0x004B, # ADDQ.B #1,$FF004B
+      0x4A39, 0x00FF, 0x0006, # TST.B $FF0006
+      0x66F2                  # BNE back to ADDQ
+    ])
+    bus.write_byte(0xFF0006, 1)
+
+    cpu.step
+    cpu.step
+    cpu.step
+
+    expect(cpu.pc).to eq(0x100)
+    expect(bus.read_byte(0xFF004B)).to eq(1 + (MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES / 20))
+    expect(cpu.cycles).to eq(MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES)
+  end
+
   it 'keeps sign-extended absolute-short LEA values in address registers' do
     reset_to(0x100)
     load_program(0x100, [
@@ -429,6 +447,21 @@ RSpec.describe MegaDrive::M68K do
     cpu.step
     expect(cpu.pc).to eq(0x106)
     expect(cpu.d[1] & 0xFFFF).to eq(0xFFFF)
+  end
+
+  it 'coalesces DBF self-delay loops in interruptible chunks' do
+    reset_to(0x100)
+    cpu.d[3] = 0xFFFF
+    load_program(0x100, [
+      0x51CB, 0xFFFE # DBF D3,$100
+    ])
+
+    cpu.step
+
+    iterations = MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES / 10
+    expect(cpu.pc).to eq(0x100)
+    expect(cpu.d[3] & 0xFFFF).to eq(0xFFFF - iterations)
+    expect(cpu.cycles).to eq(iterations * 10)
   end
 
   it 'executes dynamic bit tests and mutations' do
