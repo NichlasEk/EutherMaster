@@ -123,16 +123,13 @@ module MegaDrive
 
       if @control_pending
         @address = (@control_latch & 0x3FFF) | ((value & 0x0007) << 14)
-        @code = (@code & ~0x3C) | ((value >> 2) & 0x3C)
-        @location_bits = @code & 0x0F
+        @location_bits = (@location_bits & 0x01) | ((value >> 3) & 0x06)
         @dma_active = dma_enabled? && (value & 0x0080) != 0
         @control_pending = false
         perform_dma if @dma_active
       else
         @control_latch = value
         @address = (@address & 0x1C000) | (value & 0x3FFF)
-        @code = (@code & 0x3C) | ((value >> 14) & 0x03)
-        @location_bits = @code & 0x0F
 
         if (value & 0xC000) == 0x8000
           register = (value >> 8) & 0x1F
@@ -142,6 +139,7 @@ module MegaDrive
           @control_pending = false
         else
           @mode_write = (value & 0x4000) != 0
+          @location_bits = (@location_bits & 0x06) | ((value >> 15) & 0x01)
           @control_pending = true
         end
       end
@@ -203,11 +201,17 @@ module MegaDrive
     end
 
     def memory_target
-      case @location_bits
-      when 0x00, 0x01 then :vram
-      when 0x03 then :cram
-      when 0x05 then :vsram
-      else :invalid
+      case [@location_bits & 0x07, @mode_write]
+      when [0x00, true], [0x00, false]
+        :vram
+      when [0x01, true], [0x04, false]
+        :cram
+      when [0x02, true], [0x02, false]
+        :vsram
+      when [0x06, false]
+        :vram
+      else
+        :invalid
       end
     end
 

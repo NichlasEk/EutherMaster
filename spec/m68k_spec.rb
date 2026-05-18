@@ -547,6 +547,43 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_c?).to be true
   end
 
+  it 'executes memory rotates and shifts' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0xE7F8, 0x2000, # ROL.W ($2000).W
+      0xE2F8, 0x2002  # LSR.W ($2002).W
+    ])
+    bus.write_word(0x2000, 0x8001)
+    bus.write_word(0x2002, 0x0003)
+
+    cpu.step
+    expect(bus.read_word(0x2000)).to eq(0x0003)
+    expect(cpu.flag_c?).to be true
+
+    cpu.step
+    expect(bus.read_word(0x2002)).to eq(0x0001)
+    expect(cpu.flag_c?).to be true
+  end
+
+  it 'executes MOVEP without treating it as a bit operation' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x01C8, 0x0010, # MOVEP.L D0,$10(A0)
+      0x0348, 0x0010  # MOVEP.L $10(A0),D1
+    ])
+    cpu.instance_variable_get(:@a)[0] = 0x2000
+    cpu.instance_variable_get(:@d)[0] = 0x1234_5678
+
+    cpu.step
+    expect(bus.read_byte(0x2010)).to eq(0x12)
+    expect(bus.read_byte(0x2012)).to eq(0x34)
+    expect(bus.read_byte(0x2014)).to eq(0x56)
+    expect(bus.read_byte(0x2016)).to eq(0x78)
+
+    cpu.step
+    expect(cpu.d[1]).to eq(0x1234_5678)
+  end
+
   it 'handles address-register indexed effective addresses' do
     reset_to(0x100)
     load_program(0x100, [
@@ -624,5 +661,18 @@ RSpec.describe MegaDrive::M68K do
     cpu.step
     expect(cpu.pc).to eq(0x200)
     expect(cpu.sr).to eq(0x2300)
+  end
+
+  it 'services TRAP vectors' do
+    reset_to(0x100)
+    bus.write_long((32 + 1) * 4, 0x200)
+    load_program(0x100, [0x4E41]) # TRAP #1
+
+    cpu.step
+
+    expect(cpu.pc).to eq(0x200)
+    expect(cpu.ssp).to eq(0x00FE_FFFA)
+    expect(bus.read_word(cpu.ssp)).to eq(0x2700)
+    expect(bus.read_long(cpu.ssp + 2)).to eq(0x102)
   end
 end

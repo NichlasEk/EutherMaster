@@ -146,6 +146,10 @@ RSpec.describe 'Mega Drive audio' do
     bus.write_word(0xC00004, 0x0010)
     bus.write_word(0xC00000, 0x0BEE)
     expect(vdp.vsram[0]).to eq(0x03EE)
+
+    bus.write_word(0xC00004, 0x0000) # CRAM read address 0
+    bus.write_word(0xC00004, 0x0020)
+    expect(bus.read_word(0xC00000)).to eq(0x0EEE)
   end
 
   it 'binds the UI-visible framebuffer to the Mega Drive VDP' do

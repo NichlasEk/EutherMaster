@@ -114,6 +114,8 @@ module MegaDrive
         @pc = pop_long & ADDRESS_MASK
         finish(16)
       else
+        return trap(opcode & 0x0F) if (opcode & 0xFFF0) == 0x4E40
+        return movep(opcode) if movep_opcode?(opcode)
         return bit_operation(opcode) if bit_operation?(opcode)
         return move_from_sr(opcode) if (opcode & 0xFFC0) == 0x40C0
         return clr(opcode) if (opcode & 0xFF00) == 0x4200
@@ -136,6 +138,7 @@ module MegaDrive
         return exg(opcode) if exg_opcode?(opcode)
         return logical_operation(opcode, :and) if (opcode & 0xF000) == 0xC000
         return cmp(opcode) if (opcode & 0xF000) == 0xB000
+        return shift_memory(opcode) if (opcode & 0xF000) == 0xE000 && ((opcode >> 6) & 0x03) == 0x03
         return shift_register(opcode) if (opcode & 0xF000) == 0xE000 && ((opcode >> 6) & 0x03) != 0x03
         return moveq(opcode) if (opcode & 0xF000) == 0x7000
         return branch(opcode) if (opcode & 0xF000) == 0x6000
@@ -166,6 +169,10 @@ module MegaDrive
 
     def bit_operation?(opcode)
       (opcode & 0xF100) == 0x0100 || (opcode & 0xFF00) == 0x0800
+    end
+
+    def movep_opcode?(opcode)
+      (opcode & 0xF138) == 0x0108
     end
 
     def exg_opcode?(opcode)
@@ -266,6 +273,71 @@ module MegaDrive
         @ccr |= FLAG_N if (result & sign) != 0
       end
       finish(6 + (count * 2))
+    end
+
+    def shift_memory(opcode)
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      raise NotImplementedError, "M68K invalid memory shift EA mode #{mode}/#{reg}" if mode < 2
+
+      left = (opcode & 0x0100) != 0
+      type = (opcode >> 9) & 0x03
+      address = writable_memory_ea_address(mode, reg, SIZE_WORD)
+      value = read_word(address)
+      sign = 0x8000
+      result = value
+      carry = false
+      overflow = false
+
+      case type
+      when 0 # ASL/ASR
+        if left
+          carry = (result & sign) != 0
+          shifted = (result << 1) & 0xFFFF
+          overflow = ((result ^ shifted) & sign) != 0
+          result = shifted
+        else
+          carry = (result & 0x0001) != 0
+          result = ((result >> 1) | (result & sign)) & 0xFFFF
+        end
+        @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+      when 1 # LSL/LSR
+        if left
+          carry = (result & sign) != 0
+          result = (result << 1) & 0xFFFF
+        else
+          carry = (result & 0x0001) != 0
+          result = (result >> 1) & 0xFFFF
+        end
+        @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+      when 2 # ROXL/ROXR
+        extend = (@ccr & FLAG_X) != 0
+        if left
+          carry = (result & sign) != 0
+          result = ((result << 1) | (extend ? 1 : 0)) & 0xFFFF
+        else
+          carry = (result & 0x0001) != 0
+          result = ((result >> 1) | (extend ? sign : 0)) & 0xFFFF
+        end
+        @ccr = (@ccr & ~FLAG_X) | (carry ? FLAG_X : 0)
+      when 3 # ROL/ROR
+        if left
+          carry = (result & sign) != 0
+          result = ((result << 1) | (carry ? 1 : 0)) & 0xFFFF
+        else
+          carry = (result & 0x0001) != 0
+          result = ((result >> 1) | (carry ? sign : 0)) & 0xFFFF
+        end
+      end
+
+      write_word(address, result)
+      extend = @ccr & FLAG_X
+      @ccr = extend
+      @ccr |= FLAG_C if carry
+      @ccr |= FLAG_V if overflow
+      @ccr |= FLAG_Z if result.zero?
+      @ccr |= FLAG_N if (result & sign) != 0
+      finish(8)
     end
 
     def bit_operation(opcode)
@@ -378,6 +450,15 @@ module MegaDrive
       set_sp(read_address_register(reg))
       write_address_register(reg, pop_long)
       finish(12)
+    end
+
+    def trap(vector)
+      old_sr = sr
+      @supervisor = true
+      push_long(@pc)
+      push_word(old_sr)
+      @pc = read_long((32 + vector) * 4) & ADDRESS_MASK
+      finish(34)
     end
 
     def move_usp(opcode)
@@ -672,6 +753,36 @@ module MegaDrive
       end
 
       finish(12 + mask.digits(2).count(1) * (size == SIZE_LONG ? 8 : 4))
+    end
+
+    def movep(opcode)
+      data_reg = (opcode >> 9) & 0x07
+      address_reg = opcode & 0x07
+      size = (opcode & 0x0040) != 0 ? SIZE_LONG : SIZE_WORD
+      register_to_memory = (opcode & 0x0080) != 0
+      address = (read_address_register(address_reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+
+      if register_to_memory
+        value = @d[data_reg]
+        if size == SIZE_WORD
+          write_byte(address, (value >> 8) & 0xFF)
+          write_byte(address + 2, value & 0xFF)
+        else
+          write_byte(address, (value >> 24) & 0xFF)
+          write_byte(address + 2, (value >> 16) & 0xFF)
+          write_byte(address + 4, (value >> 8) & 0xFF)
+          write_byte(address + 6, value & 0xFF)
+        end
+      elsif size == SIZE_WORD
+        value = (read_byte(address) << 8) | read_byte(address + 2)
+        write_data_register(data_reg, SIZE_WORD, value)
+      else
+        value = (read_byte(address) << 24) | (read_byte(address + 2) << 16) |
+                (read_byte(address + 4) << 8) | read_byte(address + 6)
+        write_data_register(data_reg, SIZE_LONG, value)
+      end
+
+      finish(size == SIZE_WORD ? 16 : 24)
     end
 
     def branch(opcode)
