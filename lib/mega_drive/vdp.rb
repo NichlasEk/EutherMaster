@@ -336,8 +336,10 @@ module MegaDrive
       backdrop = color_index(@registers[7] & 0x3F)
       @framebuffer.fill(backdrop)
       drew = !display_enabled?
+      rendered_display = false
 
       if display_enabled?
+        rendered_display = true
         prepare_render_cache
         drew = if fast_scroll_renderer?
                  draw_scroll_planes_fast
@@ -346,7 +348,7 @@ module MegaDrive
                end
       end
 
-      draw_vram_activity_frame unless drew
+      draw_vram_activity_frame unless drew || rendered_display
 
       @video_dirty = false
       @render_version += 1
