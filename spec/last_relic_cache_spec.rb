@@ -21,6 +21,8 @@ RSpec.describe AstralVerse::LastRelicCache do
     described_class.save_rom_dir(rom_dir)
     described_class.save_volume(0.42)
     described_class.save_debug_mask(true)
+    described_class.save_timing_mode(:pal)
+    described_class.save_region_mode(:eu)
 
     config = File.read('.astralverse.toml')
     expect(config).to include('[paths]')
@@ -30,12 +32,16 @@ RSpec.describe AstralVerse::LastRelicCache do
     expect(config).to include('volume = 0.42')
     expect(config).to include('debug_mask = true')
     expect(config).to include('autostart = true')
+    expect(config).to include('timing_mode = "pal"')
+    expect(config).to include('region_mode = "eu"')
 
     expect(described_class.last_relic).to eq(rom_path)
     expect(described_class.rom_dir).to eq(rom_dir)
     expect(described_class.volume).to eq(0.42)
     expect(described_class.debug_mask?).to be(true)
     expect(described_class.autostart?).to be(true)
+    expect(described_class.timing_mode).to eq('pal')
+    expect(described_class.region_mode).to eq('eu')
   end
 
   it 'falls back to the old cache files when TOML has not been written yet' do

@@ -21,7 +21,7 @@ module MegaDrive
     WORK_RAM_BASE = 0x00E0_0000
     WORK_RAM_MASK = 0x0000_FFFF
 
-    attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle
+    attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :version_register
 
     def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, z80_bus: nil, z80_cpu: nil)
       @memory = Array.new(size, 0)
@@ -37,6 +37,7 @@ module MegaDrive
       @z80_bus_requested = false
       @z80_reset_asserted = true
       @frame_cycle = 0
+      @version_register = 0xA0
     end
 
     def load(address, bytes)
@@ -51,7 +52,7 @@ module MegaDrive
     def read_byte(address)
       address &= ADDRESS_MASK
       return @ym2612.read_register(address) if ym2612_address?(address)
-      return 0xA0 if io_pair?(address, IO_VERSION_BASE)
+      return @version_register if io_pair?(address, IO_VERSION_BASE)
       return @controller ? @controller.read_data : 0x7F if io_pair?(address, IO_PORT_1_DATA_BASE)
       return @controller ? @controller.read_control : 0x00 if io_pair?(address, IO_PORT_1_CONTROL_BASE)
       return z80_bus_request_status if z80_bus_request_address?(address)

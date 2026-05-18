@@ -15,7 +15,9 @@ module AstralVerse
         scanlines: false,
         scanline_strength: 0.35,
         sharp_pixels: false,
-        autostart: true
+        autostart: true,
+        timing_mode: 'auto',
+        region_mode: 'auto'
       },
       key_bindings: {},
       controller_bindings: {}
@@ -116,6 +118,39 @@ module AstralVerse
       config[:ui].key?(:autostart) ? !!config[:ui][:autostart] : true
     rescue
       true
+    end
+
+    TIMING_MODES = %w[auto ntsc pal].freeze
+    REGION_MODES = %w[auto jp us eu].freeze
+
+    def self.timing_mode
+      mode = config[:ui][:timing_mode].to_s.downcase
+      TIMING_MODES.include?(mode) ? mode : 'auto'
+    rescue
+      'auto'
+    end
+
+    def self.save_timing_mode(mode)
+      selected = mode.to_s.downcase
+      selected = 'auto' unless TIMING_MODES.include?(selected)
+      update_config(ui: { timing_mode: selected })
+    rescue => e
+      puts "⚠️ Could not save timing mode: #{e.message}"
+    end
+
+    def self.region_mode
+      mode = config[:ui][:region_mode].to_s.downcase
+      REGION_MODES.include?(mode) ? mode : 'auto'
+    rescue
+      'auto'
+    end
+
+    def self.save_region_mode(mode)
+      selected = mode.to_s.downcase
+      selected = 'auto' unless REGION_MODES.include?(selected)
+      update_config(ui: { region_mode: selected })
+    rescue => e
+      puts "⚠️ Could not save region mode: #{e.message}"
     end
 
     def self.key_bindings

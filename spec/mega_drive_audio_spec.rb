@@ -327,6 +327,18 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_word(0xE0FFFE)).to eq(0xABCD)
   end
 
+  it 'reports configured Mega Drive timing and region through the version register' do
+    emulator = MegaDrive::Emulator.new
+
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0xA0)
+
+    emulator.configure_region(timing: :pal, region: :eu)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0xE0)
+
+    emulator.configure_region(timing: :ntsc, region: :jp)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0x80)
+  end
+
   it 'uses the Genesis VRAM odd-address word lane mapping' do
     vdp = MegaDrive::VDP.new
     bus = MegaDrive::M68KBus.new(vdp: vdp)

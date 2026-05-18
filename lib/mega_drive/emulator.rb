@@ -9,6 +9,8 @@ module MegaDrive
     Z80_BATCH_CYCLES = 128
 
     def initialize
+      @timing_mode = :auto
+      @region_mode = :auto
       build_audio
       build_video
       @controller = Controller.new
@@ -31,6 +33,7 @@ module MegaDrive
       @controller = Controller.new
       build_buses
       @bus.load_rom(normalized_rom_bytes(data, info))
+      apply_region_configuration
       @cpu = M68K.new(@bus)
       @rom_loaded = true
       @render_version += 1
@@ -47,6 +50,14 @@ module MegaDrive
       @cpu.reset if @rom_loaded
       @frame_count = 0
       reset_perf
+      apply_region_configuration
+    end
+
+    def configure_region(timing: :auto, region: :auto)
+      @timing_mode = normalize_timing_mode(timing)
+      @region_mode = normalize_region_mode(region)
+      apply_region_configuration
+      self
     end
 
     def run_frame
@@ -110,6 +121,7 @@ module MegaDrive
       @bus.z80_bus = @z80_bus
       @bus.z80_cpu = @z80_cpu
       @vdp.bus = @bus
+      apply_region_configuration
       self
     end
 
@@ -152,6 +164,34 @@ module MegaDrive
       @z80_cpu = SmsEmulator::Z80.new(@z80_bus)
       @bus.z80_bus = @z80_bus
       @bus.z80_cpu = @z80_cpu
+      apply_region_configuration
+    end
+
+    def apply_region_configuration
+      @bus.version_register = md_version_register if @bus
+    end
+
+    def md_version_register
+      overseas = case @region_mode
+                 when :jp then false
+                 else true
+                 end
+      pal = case @timing_mode
+            when :pal then true
+            when :ntsc then false
+            else @region_mode == :eu
+            end
+      0x80 | (pal ? 0x40 : 0) | (overseas ? 0x20 : 0)
+    end
+
+    def normalize_timing_mode(mode)
+      value = mode.to_s.downcase.to_sym
+      %i[auto ntsc pal].include?(value) ? value : :auto
+    end
+
+    def normalize_region_mode(mode)
+      value = mode.to_s.downcase.to_sym
+      %i[auto jp us eu].include?(value) ? value : :auto
     end
 
     def normalized_rom_bytes(data, info)

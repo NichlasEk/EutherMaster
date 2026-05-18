@@ -35,6 +35,19 @@ module AstralVerse
       ].freeze
       VOLUME_SLIDER = { x: 560, y: 4, w: 90, h: TOOLBAR_H - 8 }.freeze
       SCANLINE_CONTROL = { x: 656, y: 4, w: 108, h: TOOLBAR_H - 8 }.freeze
+      TIMING_SELECT = { x: 770, y: 4, w: 78, h: TOOLBAR_H - 8 }.freeze
+      REGION_SELECT = { x: 854, y: 4, w: 78, h: TOOLBAR_H - 8 }.freeze
+      TIMING_OPTIONS = [
+        [:pal, 'PAL'],
+        [:ntsc, 'NTSC'],
+        [:auto, 'AUTO']
+      ].freeze
+      REGION_OPTIONS = [
+        [:jp, 'JP'],
+        [:us, 'US'],
+        [:eu, 'EU'],
+        [:auto, 'Auto']
+      ].freeze
       INPUT_ACTIONS = [
         { id: :up, label: 'Up', gesture: MysticTouch::GESTURE_NORTH, default: SDL3::K_UP, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_UP },
         { id: :down, label: 'Down', gesture: MysticTouch::GESTURE_SOUTH, default: SDL3::K_DOWN, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_DOWN },
@@ -109,6 +122,9 @@ module AstralVerse
         @dragging_scanline_strength = false
         @sharp_pixels = LastRelicCache.sharp_pixels?
         @autostart = LastRelicCache.autostart?
+        @timing_mode = LastRelicCache.timing_mode.to_sym
+        @region_mode = LastRelicCache.region_mode.to_sym
+        @open_select = nil
         @fullscreen = false
         @debug_mask = LastRelicCache.debug_mask?
         @mouse_visible_until = 0
@@ -334,7 +350,16 @@ module AstralVerse
           click_browser(x, y)
         elsif @keybindings_open
           click_keybindings(x, y)
-        elsif !@fullscreen && y <= TOOLBAR_H
+        elsif !@fullscreen
+          return if click_select_option(x, y)
+
+          if @open_select && y > TOOLBAR_H
+            @open_select = nil
+            return
+          end
+
+          return unless y <= TOOLBAR_H
+
           if volume_slider_hit?(x, y)
             @dragging_volume = true
             set_volume_from_x(x)
@@ -354,6 +379,14 @@ module AstralVerse
           if scanline_slider_hit?(x, y)
             @dragging_scanline_strength = true
             set_scanline_strength_from_x(x)
+            return
+          end
+          if select_hit?(TIMING_SELECT, x, y)
+            @open_select = @open_select == :timing ? nil : :timing
+            return
+          end
+          if select_hit?(REGION_SELECT, x, y)
+            @open_select = @open_select == :region ? nil : :region
             return
           end
 
@@ -488,6 +521,9 @@ module AstralVerse
         end
         draw_volume_slider
         draw_scanline_control
+        draw_select(TIMING_SELECT, selected_option_label(TIMING_OPTIONS, @timing_mode), @open_select == :timing)
+        draw_select(REGION_SELECT, selected_option_label(REGION_OPTIONS, @region_mode), @open_select == :region)
+        draw_open_select_menu
       end
 
       def draw_volume_slider
@@ -521,6 +557,34 @@ module AstralVerse
         sharp_x = control[:x] + 74
         draw_checkbox(sharp_x, control[:y] + 8, @sharp_pixels)
         text('Sh', sharp_x + 17, control[:y] + 7, 12, COLORS[:text])
+      end
+
+      def draw_select(bounds, label, open)
+        hover = @last_mouse[1] <= TOOLBAR_H && select_hit?(bounds, @last_mouse[0], @last_mouse[1])
+        fill_rect(bounds[:x], bounds[:y], bounds[:w], bounds[:h], hover || open ? COLORS[:hover] : COLORS[:button])
+        text(label, bounds[:x] + 9, bounds[:y] + 7, 12, COLORS[:text])
+        arrow_x = bounds[:x] + bounds[:w] - 13
+        arrow_y = bounds[:y] + bounds[:h] / 2 - 1
+        fill_rect(arrow_x, arrow_y, 7, 2, COLORS[:text])
+        fill_rect(arrow_x + 2, arrow_y + 3, 3, 2, COLORS[:text])
+      end
+
+      def draw_open_select_menu
+        return unless @open_select
+
+        bounds = @open_select == :timing ? TIMING_SELECT : REGION_SELECT
+        options = @open_select == :timing ? TIMING_OPTIONS : REGION_OPTIONS
+        selected = @open_select == :timing ? @timing_mode : @region_mode
+        options.each_with_index do |(value, label), index|
+          y = TOOLBAR_H + index * 26
+          active = value == selected
+          fill_rect(bounds[:x], y, bounds[:w], 25, active ? COLORS[:hover] : COLORS[:panel])
+          fill_rect(bounds[:x], y, bounds[:w], 1, COLORS[:border])
+          text(label, bounds[:x] + 9, y + 6, 12, active ? COLORS[:good] : COLORS[:text])
+        end
+        fill_rect(bounds[:x], TOOLBAR_H + options.length * 26 - 1, bounds[:w], 1, COLORS[:border])
+        fill_rect(bounds[:x], TOOLBAR_H, 1, options.length * 26, COLORS[:border])
+        fill_rect(bounds[:x] + bounds[:w] - 1, TOOLBAR_H, 1, options.length * 26, COLORS[:border])
       end
 
       def draw_keybindings_menu
@@ -726,6 +790,7 @@ module AstralVerse
         @running = false
         @audio_player&.stop
         @stone.absorb_codex(path)
+        apply_console_region
         @audio_player = build_audio_player
         @frame_count = 0
         @last_vision = now_ms
@@ -757,6 +822,7 @@ module AstralVerse
         @running = false
         @audio_player&.stop
         path = @stone.load_snapshot
+        apply_console_region
         @audio_player = build_audio_player
         @frame_count = @stone.emulator.frame_count
         @last_vision = now_ms
@@ -930,10 +996,18 @@ module AstralVerse
         player
       end
 
+      def apply_console_region
+        emulator = @stone.emulator
+        return unless emulator.respond_to?(:configure_region)
+
+        emulator.configure_region(timing: @timing_mode, region: @region_mode)
+      end
+
       def autostart_loaded_relic
         return unless @stone.instance_variable_get(:@codex_present)
         return unless @autostart
 
+        apply_console_region
         @running = true
         @last_vision = now_ms
       end
@@ -966,6 +1040,39 @@ module AstralVerse
         control = SCANLINE_CONTROL
         x >= control[:x] + 70 && x <= control[:x] + control[:w] &&
           y >= control[:y] && y <= control[:y] + control[:h]
+      end
+
+      def select_hit?(bounds, x, y)
+        x >= bounds[:x] && x <= bounds[:x] + bounds[:w] &&
+          y >= bounds[:y] && y <= bounds[:y] + bounds[:h]
+      end
+
+      def click_select_option(x, y)
+        return false unless @open_select
+
+        bounds = @open_select == :timing ? TIMING_SELECT : REGION_SELECT
+        options = @open_select == :timing ? TIMING_OPTIONS : REGION_OPTIONS
+        return false unless x >= bounds[:x] && x <= bounds[:x] + bounds[:w] && y >= TOOLBAR_H
+
+        index = ((y - TOOLBAR_H) / 26).floor
+        return false unless index >= 0 && index < options.length
+
+        value = options[index][0]
+        if @open_select == :timing
+          @timing_mode = value
+          LastRelicCache.save_timing_mode(value)
+        else
+          @region_mode = value
+          LastRelicCache.save_region_mode(value)
+        end
+        @open_select = nil
+        apply_console_region
+        flash_status("MD region #{selected_option_label(TIMING_OPTIONS, @timing_mode)} #{selected_option_label(REGION_OPTIONS, @region_mode)}")
+        true
+      end
+
+      def selected_option_label(options, selected)
+        options.find { |value, _label| value == selected }&.[](1) || options.first[1]
       end
 
       def scanline_track_x
