@@ -33,6 +33,8 @@ module MegaDrive
       @palette_version = -1
       @palette_rgba = nil
       @sharp_palette_rgba = nil
+      @pattern_row_cache = Array.new(0x800 * 8)
+      @pattern_row_cache_packed = true
     end
 
     def reset
@@ -57,6 +59,8 @@ module MegaDrive
       @palette_version = -1
       @palette_rgba = nil
       @sharp_palette_rgba = nil
+      @pattern_row_cache = Array.new(0x800 * 8)
+      @pattern_row_cache_packed = true
     end
 
     def read_data
@@ -295,6 +299,7 @@ module MegaDrive
         address &= 0xFFFF
         @video_dirty = true if @vram[address] != byte
         @vram[address] = byte
+        invalidate_pattern_row(address)
       end
     end
 
@@ -312,6 +317,8 @@ module MegaDrive
       @video_dirty = true if @vram[address] != high || @vram[low_address] != low
       @vram[address] = high
       @vram[low_address] = low
+      invalidate_pattern_row(address)
+      invalidate_pattern_row(low_address)
     end
 
     def increment_address
@@ -328,30 +335,179 @@ module MegaDrive
 
       if display_enabled?
         prepare_render_cache
-        sprites = sprite_pixels
-        height = @screen_height
-        width = @screen_width
-        height.times do |screen_y|
-          source_y = @source_y_cache[screen_y]
-          row_offset = screen_y * width
-          width.times do |screen_x|
-            source_x = @source_x_cache[screen_x]
-            scroll_b = plane_pixel(:b, source_x, source_y)
-            scroll_a = window_pixel(source_x, source_y) || plane_pixel(:a, source_x, source_y)
-            sprite = sprites[row_offset + screen_x]
-            pixel = resolve_pixel(sprite, scroll_a, scroll_b)
-            next unless pixel
-
-            @framebuffer[row_offset + screen_x] = pixel & 0x3F
-            drew = true
-          end
-        end
+        drew = if fast_scroll_renderer?
+                 draw_scroll_planes_fast
+               else
+                 draw_scroll_planes_generic
+               end
       end
 
       draw_vram_activity_frame unless drew
 
       @video_dirty = false
       @render_version += 1
+    end
+
+    def draw_scroll_planes_generic
+      sprites = sprite_pixels
+      height = @screen_height
+      width = @screen_width
+      drew = false
+      height.times do |screen_y|
+        source_y = @source_y_cache[screen_y]
+        row_offset = screen_y * width
+        width.times do |screen_x|
+          source_x = @source_x_cache[screen_x]
+          scroll_b = plane_pixel(:b, source_x, source_y)
+          scroll_a = if @window_enabled_cache
+                       window_pixel(source_x, source_y) || plane_pixel(:a, source_x, source_y)
+                     else
+                       plane_pixel(:a, source_x, source_y)
+                     end
+          sprite = sprites[row_offset + screen_x]
+          pixel = resolve_pixel(sprite, scroll_a, scroll_b)
+          next unless pixel
+
+          @framebuffer[row_offset + screen_x] = pixel & 0x3F
+          drew = true
+        end
+      end
+      drew
+    end
+
+    def fast_scroll_renderer?
+      !@window_enabled_cache &&
+        @source_x_cache&.length == @screen_width &&
+        @source_y_cache&.length == @screen_height &&
+        @source_x_cache[0] == 0 &&
+        @source_x_cache[-1] == @screen_width - 1 &&
+        @source_y_cache[0] == 0 &&
+        @source_y_cache[-1] == @screen_height - 1
+    end
+
+    def draw_scroll_planes_fast
+      sprites = sprite_pixels
+      vram = @vram
+      framebuffer = @framebuffer
+      pattern_cache = @pattern_row_cache
+      width = @screen_width
+      height = @screen_height
+      width_cells, height_cells = @plane_dimensions_cache
+      map_width = width_cells * 8
+      map_height = height_cells * 8
+      plane_a = plane_a_base
+      plane_b = plane_b_base
+      h_scroll_a = @h_scroll_a_cache
+      h_scroll_b = @h_scroll_b_cache
+      v_scroll_a = @v_scroll_a_cache
+      v_scroll_b = @v_scroll_b_cache
+      drew = false
+
+      screen_y = 0
+      while screen_y < height
+        row_offset = screen_y * width
+        ha = h_scroll_a[screen_y]
+        hb = h_scroll_b[screen_y]
+        screen_x = 0
+        while screen_x < width
+          column = screen_x >> 4
+          sy_b = (screen_y + v_scroll_b[column]) % map_height
+          sx_b = (screen_x - hb) % map_width
+          cell_y_b = sy_b >> 3
+          cell_x_b = sx_b >> 3
+          address_b = (plane_b + ((2 * (cell_y_b * width_cells + cell_x_b)) & 0x1FFF)) & 0xFFFF
+          entry_b = ((vram[address_b] || 0) << 8) | (vram[(address_b ^ 1) & 0xFFFF] || 0)
+          row_b = sy_b & 7
+          row_b = 7 - row_b if (entry_b & 0x1000) != 0
+          col_b = sx_b & 7
+          col_b = 7 - col_b if (entry_b & 0x0800) != 0
+          key_b = ((entry_b & 0x07FF) << 3) | row_b
+          packed_b = pattern_cache[key_b]
+          unless packed_b
+            tile_b = (entry_b & 0x07FF) * 32 + row_b * 4
+            packed_b = ((vram[tile_b & 0xFFFF] || 0) << 24) |
+                       ((vram[(tile_b + 1) & 0xFFFF] || 0) << 16) |
+                       ((vram[(tile_b + 2) & 0xFFFF] || 0) << 8) |
+                       (vram[(tile_b + 3) & 0xFFFF] || 0)
+            pattern_cache[key_b] = packed_b
+          end
+          step_b = (entry_b & 0x0800) != 0 ? -1 : 1
+          limit_b = step_b.positive? ? 8 - col_b : col_b + 1
+          attr_b = ((entry_b & 0x8000) != 0 ? 0x100 : 0) | ((entry_b >> 9) & 0x30)
+
+          sy_a = (screen_y + v_scroll_a[column]) % map_height
+          sx_a = (screen_x - ha) % map_width
+          cell_y_a = sy_a >> 3
+          cell_x_a = sx_a >> 3
+          address_a = (plane_a + ((2 * (cell_y_a * width_cells + cell_x_a)) & 0x1FFF)) & 0xFFFF
+          entry_a = ((vram[address_a] || 0) << 8) | (vram[(address_a ^ 1) & 0xFFFF] || 0)
+          row_a = sy_a & 7
+          row_a = 7 - row_a if (entry_a & 0x1000) != 0
+          col_a = sx_a & 7
+          col_a = 7 - col_a if (entry_a & 0x0800) != 0
+          key_a = ((entry_a & 0x07FF) << 3) | row_a
+          packed_a = pattern_cache[key_a]
+          unless packed_a
+            tile_a = (entry_a & 0x07FF) * 32 + row_a * 4
+            packed_a = ((vram[tile_a & 0xFFFF] || 0) << 24) |
+                       ((vram[(tile_a + 1) & 0xFFFF] || 0) << 16) |
+                       ((vram[(tile_a + 2) & 0xFFFF] || 0) << 8) |
+                       (vram[(tile_a + 3) & 0xFFFF] || 0)
+            pattern_cache[key_a] = packed_a
+          end
+          step_a = (entry_a & 0x0800) != 0 ? -1 : 1
+          limit_a = step_a.positive? ? 8 - col_a : col_a + 1
+          attr_a = ((entry_a & 0x8000) != 0 ? 0x100 : 0) | ((entry_a >> 9) & 0x30)
+
+          run = width - screen_x
+          column_run = 16 - (screen_x & 15)
+          run = column_run if column_run < run
+          run = limit_a if limit_a < run
+          run = limit_b if limit_b < run
+
+          run_index = 0
+          index = row_offset + screen_x
+          while run_index < run
+            color_b = (packed_b >> ((7 - col_b) * 4)) & 0x0F
+            scroll_b = color_b.zero? ? nil : (attr_b | color_b)
+            color_a = (packed_a >> ((7 - col_a) * 4)) & 0x0F
+            scroll_a = color_a.zero? ? nil : (attr_a | color_a)
+            sprite = sprites[index]
+            pixel = nil
+            sprite_priority = sprite && (sprite & 0x100) != 0
+            a_priority = scroll_a && (scroll_a & 0x100) != 0
+            b_priority = scroll_b && (scroll_b & 0x100) != 0
+
+            if sprite_priority
+              if a_priority || !b_priority
+                pixel = sprite || scroll_a || scroll_b
+              else
+                pixel = sprite || scroll_b || scroll_a
+              end
+            elsif a_priority
+              pixel = scroll_a || (b_priority ? (scroll_b || sprite) : (sprite || scroll_b))
+            elsif b_priority
+              pixel = scroll_b || sprite || scroll_a
+            else
+              pixel = sprite || scroll_a || scroll_b
+            end
+
+            if pixel
+              framebuffer[index] = pixel & 0x3F
+              drew = true
+            end
+
+            col_a += step_a
+            col_b += step_b
+            index += 1
+            run_index += 1
+          end
+          screen_x += run
+        end
+        screen_y += 1
+      end
+
+      drew
     end
 
     def plane_pixel(plane, source_x, source_y)
@@ -490,11 +646,11 @@ module MegaDrive
       pattern = entry & 0x07FF
       row = 7 - row if (entry & 0x1000) != 0
       column = 7 - column if (entry & 0x0800) != 0
-      pattern_row(pattern, row)[column]
+      (pattern_row(pattern, row) >> ((7 - column) * 4)) & 0x0F
     end
 
     def pattern_pixel(pattern, row, column)
-      pattern_row(pattern, row)[column]
+      (pattern_row(pattern, row) >> ((7 - column) * 4)) & 0x0F
     end
 
     def pattern_row(pattern, row)
@@ -507,12 +663,11 @@ module MegaDrive
       b1 = @vram[(address + 1) & 0xFFFF] || 0
       b2 = @vram[(address + 2) & 0xFFFF] || 0
       b3 = @vram[(address + 3) & 0xFFFF] || 0
-      @pattern_row_cache[key] = [
-        (b0 >> 4) & 0x0F, b0 & 0x0F,
-        (b1 >> 4) & 0x0F, b1 & 0x0F,
-        (b2 >> 4) & 0x0F, b2 & 0x0F,
-        (b3 >> 4) & 0x0F, b3 & 0x0F
-      ]
+      @pattern_row_cache[key] =
+        ((b0 & 0xFF) << 24) |
+        ((b1 & 0xFF) << 16) |
+        ((b2 & 0xFF) << 8) |
+        (b3 & 0xFF)
     end
 
     def color_index(cram_index)
@@ -531,7 +686,15 @@ module MegaDrive
       @v_scroll_a_cache = Array.new(columns) { |column| v_scroll_value_for_column(:a, column) }
       @v_scroll_b_cache = Array.new(columns) { |column| v_scroll_value_for_column(:b, column) }
       @window_range_cache = Array.new(height) { |y| window_range(y) }
-      @pattern_row_cache = {}
+      @window_enabled_cache = @window_range_cache.any? { |range| range && range[1] > range[0] }
+      unless @pattern_row_cache_packed && @pattern_row_cache&.length == 0x800 * 8
+        @pattern_row_cache = Array.new(0x800 * 8)
+        @pattern_row_cache_packed = true
+      end
+    end
+
+    def invalidate_pattern_row(address)
+      @pattern_row_cache[address >> 2] = nil if @pattern_row_cache
     end
 
     def source_cache(cache, output_size, input_size)

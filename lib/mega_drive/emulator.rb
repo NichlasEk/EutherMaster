@@ -61,11 +61,13 @@ module MegaDrive
           break
         end
       end
+      cpu_finished = monotonic_time
       @vdp.end_vblank!
       @vdp.render_frame
+      frame_finished = monotonic_time
       @frame_count += 1
       @render_version += 1
-      record_perf(monotonic_time - started, steps)
+      record_perf(cpu_finished - started, frame_finished - cpu_finished, frame_finished - started, steps)
     end
 
     def framebuffer
@@ -77,21 +79,23 @@ module MegaDrive
     def rewire_after_snapshot_load = self
 
     def reset_perf
-      @perf = { frames: 0, cpu_seconds: 0.0, frame_seconds: 0.0, cpu_steps: 0,
+      @perf = { frames: 0, cpu_seconds: 0.0, vdp_seconds: 0.0, frame_seconds: 0.0, cpu_steps: 0,
                 last_frame_ms: 0.0, last_cpu_ms: 0.0, last_vdp_ms: 0.0, last_cpu_steps: 0 }
     end
 
     def perf_summary
+      @perf[:vdp_seconds] ||= 0.0
+      @perf[:last_vdp_ms] ||= 0.0
       frames = [@perf[:frames], 1].max
       { frames: @perf[:frames],
         fps: @perf[:frame_seconds].positive? ? @perf[:frames] / @perf[:frame_seconds] : 0.0,
         avg_frame_ms: (@perf[:frame_seconds] / frames) * 1000.0,
         avg_cpu_ms: (@perf[:cpu_seconds] / frames) * 1000.0,
-        avg_vdp_ms: 0.0,
+        avg_vdp_ms: (@perf[:vdp_seconds] / frames) * 1000.0,
         avg_cpu_steps: @perf[:cpu_steps] / frames.to_f,
         last_frame_ms: @perf[:last_frame_ms],
         last_cpu_ms: @perf[:last_cpu_ms],
-        last_vdp_ms: 0.0,
+        last_vdp_ms: @perf[:last_vdp_ms],
         last_cpu_steps: @perf[:last_cpu_steps] }
     end
 
@@ -116,13 +120,16 @@ module MegaDrive
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
 
-    def record_perf(seconds, steps)
+    def record_perf(cpu_seconds, vdp_seconds, frame_seconds, steps)
+      @perf[:vdp_seconds] ||= 0.0
       @perf[:frames] += 1
-      @perf[:cpu_seconds] += seconds
-      @perf[:frame_seconds] += seconds
+      @perf[:cpu_seconds] += cpu_seconds
+      @perf[:vdp_seconds] += vdp_seconds
+      @perf[:frame_seconds] += frame_seconds
       @perf[:cpu_steps] += steps
-      @perf[:last_frame_ms] = seconds * 1000.0
-      @perf[:last_cpu_ms] = seconds * 1000.0
+      @perf[:last_frame_ms] = frame_seconds * 1000.0
+      @perf[:last_cpu_ms] = cpu_seconds * 1000.0
+      @perf[:last_vdp_ms] = vdp_seconds * 1000.0
       @perf[:last_cpu_steps] = steps
     end
   end

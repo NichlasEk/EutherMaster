@@ -12,6 +12,7 @@ module MegaDrive
     SIZE_BYTE = :byte
     SIZE_WORD = :word
     SIZE_LONG = :long
+    BUSY_WAIT_BRANCH_CYCLES = 256
 
     attr_reader :bus, :d, :pc, :usp, :ssp, :cycles, :total_cycles
     attr_accessor :stopped
@@ -658,10 +659,14 @@ module MegaDrive
 
       if condition_true?(condition)
         @pc = target
-        finish(displacement.zero? ? 10 : 10)
+        finish(short_tst_busy_wait?(displacement, target) ? BUSY_WAIT_BRANCH_CYCLES : 10)
       else
         finish(displacement.zero? ? 12 : 8)
       end
+    end
+
+    def short_tst_busy_wait?(displacement, target)
+      displacement == 0xFA && read_word(target) == 0x4A38
     end
 
     def dbcc(opcode)
