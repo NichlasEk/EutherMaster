@@ -1,14 +1,18 @@
 module MegaDrive
   class Emulator
-    attr_reader :cpu, :bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
+    attr_reader :cpu, :bus, :z80_cpu, :z80_bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
 
     CYCLES_PER_FRAME = 127_800
+    M68K_CLOCK = 7_670_454
+    Z80_CLOCK = 3_579_545
+    AUDIO_CYCLES_PER_FRAME = 59_736
+    Z80_BATCH_CYCLES = 128
 
     def initialize
       build_audio
       build_video
       @controller = Controller.new
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
+      build_buses
       @cpu = M68K.new(@bus)
       @frame_count = 0
       @rom_loaded = false
@@ -25,7 +29,7 @@ module MegaDrive
       build_audio
       build_video
       @controller = Controller.new
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
+      build_buses
       @bus.load_rom(normalized_rom_bytes(data, info))
       @cpu = M68K.new(@bus)
       @rom_loaded = true
@@ -36,6 +40,8 @@ module MegaDrive
     def reset
       @sms_psg.reset
       @ym2612.reset
+      @z80_bus.reset
+      @z80_cpu.reset
       @vdp.reset
       @controller.reset
       @cpu.reset if @rom_loaded
@@ -49,18 +55,33 @@ module MegaDrive
       started = monotonic_time
       cycles = 0
       steps = 0
+      z80_remainder = 0
+      z80_pending = 0
       @audio.begin_frame
+      @bus.begin_frame
       @vdp.request_vblank!
       while cycles < CYCLES_PER_FRAME
         begin
+          @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
           step_cycles = @cpu.step
           cycles += step_cycles
           @ym2612.tick(step_cycles)
+          z80_total = step_cycles * Z80_CLOCK + z80_remainder
+          z80_cycles = z80_total / M68K_CLOCK
+          z80_remainder = z80_total % M68K_CLOCK
+          z80_pending += z80_cycles
+          @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
+          if z80_pending >= Z80_BATCH_CYCLES
+            @bus.run_z80_cycles(z80_pending)
+            z80_pending = 0
+          end
           steps += 1
         rescue NotImplementedError
           break
         end
       end
+      @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
+      @bus.run_z80_cycles(z80_pending) if z80_pending.positive?
       cpu_finished = monotonic_time
       @vdp.end_vblank!
       @vdp.render_frame
@@ -76,7 +97,21 @@ module MegaDrive
 
     def psg = @audio
     def request_pause; end
-    def rewire_after_snapshot_load = self
+
+    def rewire_after_snapshot_load
+      @audio ||= Audio.new(@sms_psg, @ym2612)
+      @z80_bus ||= Z80Bus.new(psg: @sms_psg, ym2612: @ym2612, m68k_bus: @bus)
+      @z80_cpu ||= SmsEmulator::Z80.new(@z80_bus)
+      @z80_bus.m68k_bus = @bus
+      @bus.psg = @sms_psg
+      @bus.ym2612 = @ym2612
+      @bus.vdp = @vdp
+      @bus.controller = @controller
+      @bus.z80_bus = @z80_bus
+      @bus.z80_cpu = @z80_cpu
+      @vdp.bus = @bus
+      self
+    end
 
     def reset_perf
       @perf = { frames: 0, cpu_seconds: 0.0, vdp_seconds: 0.0, frame_seconds: 0.0, cpu_steps: 0,
@@ -109,6 +144,14 @@ module MegaDrive
 
     def build_video
       @vdp = VDP.new
+    end
+
+    def build_buses
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
+      @z80_bus = Z80Bus.new(psg: @sms_psg, ym2612: @ym2612, m68k_bus: @bus)
+      @z80_cpu = SmsEmulator::Z80.new(@z80_bus)
+      @bus.z80_bus = @z80_bus
+      @bus.z80_cpu = @z80_cpu
     end
 
     def normalized_rom_bytes(data, info)

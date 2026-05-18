@@ -43,6 +43,23 @@ RSpec.describe 'Mega Drive audio' do
     expect(samples.flatten.any? { |sample| sample.abs > 0.001 }).to be(true)
   end
 
+  it 'advances YM2612 timers and clears status flags through timer control' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0x24)
+    ym2612.write_data(0xFF)
+    ym2612.write_address_1(0x25)
+    ym2612.write_data(0x03)
+    ym2612.write_address_1(0x27)
+    ym2612.write_data(0x05)
+
+    ym2612.tick(64)
+    expect(ym2612.read_register & 0x01).to eq(0x01)
+
+    ym2612.write_address_1(0x27)
+    ym2612.write_data(0x10)
+    expect(ym2612.read_register & 0x01).to eq(0)
+  end
+
   it 'exposes combined MD audio through the existing PSG player hook' do
     emulator = MegaDrive::Emulator.new
 
@@ -58,6 +75,47 @@ RSpec.describe 'Mega Drive audio' do
     bus.write_word(0xA11100, 0x0100)
 
     expect(bus.read_byte(0xA11100) & 0x01).to eq(0)
+  end
+
+  it 'maps 68k-side writes into Z80 RAM' do
+    emulator = MegaDrive::Emulator.new
+
+    emulator.bus.write_word(0xA00000, 0x3EA0)
+    emulator.bus.write_word(0xA00002, 0x3200)
+
+    expect(emulator.z80_bus.read_byte(0x0000)).to eq(0x3E)
+    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
+    expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
+    expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
+  end
+
+  it 'runs Z80 audio code against memory-mapped YM2612 ports' do
+    emulator = MegaDrive::Emulator.new
+    program = [
+      0x3E, 0xA0,       # LD A,$A0
+      0x32, 0x00, 0x40, # LD ($4000),A
+      0x3E, 0x34,       # LD A,$34
+      0x32, 0x01, 0x40, # LD ($4001),A
+      0x76              # HALT
+    ]
+    program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
+
+    emulator.bus.write_byte(0xA11200, 0x01)
+    emulator.bus.run_z80_cycles(80)
+
+    expect(emulator.ym2612.registers[0][0xA0]).to eq(0x34)
+  end
+
+  it 'halts Z80 execution while the 68k owns the Z80 bus' do
+    emulator = MegaDrive::Emulator.new
+    emulator.bus.write_byte(0xA00000, 0x00) # NOP
+    emulator.bus.write_byte(0xA00001, 0x00) # NOP
+    emulator.bus.write_byte(0xA11200, 0x01)
+    emulator.bus.write_byte(0xA11100, 0x01)
+
+    emulator.bus.run_z80_cycles(32)
+
+    expect(emulator.z80_cpu.pc).to eq(0)
   end
 
   it 'routes 68k-side VDP ports to the Mega Drive VDP' do

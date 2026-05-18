@@ -21,6 +21,8 @@ module MegaDrive
       @busy_cycles = 0
       @timer_a_latch = 0
       @timer_b_latch = 0
+      @timer_a_counter = 0
+      @timer_b_counter = 0
       @timer_control = 0
       @key_mask = Array.new(CHANNELS, 0)
       @fnum = Array.new(CHANNELS, 0)
@@ -89,7 +91,9 @@ module MegaDrive
     end
 
     def tick(cycles)
-      @busy_cycles = [@busy_cycles - cycles.to_i, 0].max
+      cycles = cycles.to_i
+      @busy_cycles = [@busy_cycles - cycles, 0].max
+      tick_timers(cycles)
     end
 
     def render_frame_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
@@ -125,6 +129,8 @@ module MegaDrive
         @timer_control = value
         @status &= ~0x01 if (value & 0x10) != 0
         @status &= ~0x02 if (value & 0x20) != 0
+        load_timer_a if (value & 0x01) != 0
+        load_timer_b if (value & 0x02) != 0
       when 0x28
         write_key_on(value)
       when 0x2A
@@ -172,6 +178,32 @@ module MegaDrive
           @envelope[idx] = 1.0
         end
       end
+    end
+
+    def tick_timers(cycles)
+      if (@timer_control & 0x04) != 0
+        @timer_a_counter -= cycles
+        if @timer_a_counter <= 0
+          @status |= 0x01
+          load_timer_a
+        end
+      end
+
+      return if (@timer_control & 0x08).zero?
+
+      @timer_b_counter -= cycles
+      return unless @timer_b_counter <= 0
+
+      @status |= 0x02
+      load_timer_b
+    end
+
+    def load_timer_a
+      @timer_a_counter = [(1024 - (@timer_a_latch & 0x3FF)) * 18, 18].max
+    end
+
+    def load_timer_b
+      @timer_b_counter = [(256 - (@timer_b_latch & 0xFF)) * 288, 288].max
     end
 
     def write_operator_register(port, reg, value)
@@ -264,7 +296,12 @@ module MegaDrive
         phase: @phase.dup,
         envelope: @envelope.dup,
         dac_enabled: @dac_enabled,
-        dac_sample: @dac_sample
+        dac_sample: @dac_sample,
+        timer_a_counter: @timer_a_counter,
+        timer_b_counter: @timer_b_counter,
+        timer_control: @timer_control,
+        status: @status,
+        busy_cycles: @busy_cycles
       }
     end
 
@@ -283,6 +320,11 @@ module MegaDrive
       @envelope = state[:envelope].dup
       @dac_enabled = state[:dac_enabled]
       @dac_sample = state[:dac_sample]
+      @timer_a_counter = state[:timer_a_counter] || 0
+      @timer_b_counter = state[:timer_b_counter] || 0
+      @timer_control = state[:timer_control] || 0
+      @status = state[:status] || @status
+      @busy_cycles = state[:busy_cycles] || @busy_cycles
     end
   end
 end
