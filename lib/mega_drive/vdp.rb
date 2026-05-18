@@ -35,6 +35,8 @@ module MegaDrive
       @sharp_palette_rgba = nil
       @pattern_row_cache = Array.new(0x800 * 8)
       @pattern_row_cache_packed = true
+      @sprite_pixel_cache = nil
+      @sprite_occupancy_stamp = 0
     end
 
     def reset
@@ -61,6 +63,8 @@ module MegaDrive
       @sharp_palette_rgba = nil
       @pattern_row_cache = Array.new(0x800 * 8)
       @pattern_row_cache_packed = true
+      @sprite_pixel_cache = nil
+      @sprite_occupancy_stamp = 0
     end
 
     def read_data
@@ -386,7 +390,6 @@ module MegaDrive
     end
 
     def draw_scroll_planes_fast
-      sprites = sprite_pixels
       vram = @vram
       framebuffer = @framebuffer
       pattern_cache = @pattern_row_cache
@@ -402,6 +405,7 @@ module MegaDrive
       v_scroll_a = @v_scroll_a_cache
       v_scroll_b = @v_scroll_b_cache
       drew = false
+      backdrop = color_index(@registers[7] & 0x3F)
 
       screen_y = 0
       while screen_y < height
@@ -469,32 +473,27 @@ module MegaDrive
           index = row_offset + screen_x
           while run_index < run
             color_b = (packed_b >> ((7 - col_b) * 4)) & 0x0F
-            scroll_b = color_b.zero? ? nil : (attr_b | color_b)
+            scroll_b = color_b.zero? ? 0 : (attr_b | color_b)
             color_a = (packed_a >> ((7 - col_a) * 4)) & 0x0F
-            scroll_a = color_a.zero? ? nil : (attr_a | color_a)
-            sprite = sprites[index]
-            pixel = nil
-            sprite_priority = sprite && (sprite & 0x100) != 0
-            a_priority = scroll_a && (scroll_a & 0x100) != 0
-            b_priority = scroll_b && (scroll_b & 0x100) != 0
+            scroll_a = color_a.zero? ? 0 : (attr_a | color_a)
 
-            if sprite_priority
-              if a_priority || !b_priority
-                pixel = sprite || scroll_a || scroll_b
-              else
-                pixel = sprite || scroll_b || scroll_a
-              end
-            elsif a_priority
-              pixel = scroll_a || (b_priority ? (scroll_b || sprite) : (sprite || scroll_b))
-            elsif b_priority
-              pixel = scroll_b || sprite || scroll_a
-            else
-              pixel = sprite || scroll_a || scroll_b
-            end
+            pixel = if scroll_a != 0
+                      if (scroll_a & 0x100) != 0 || (scroll_b & 0x100).zero?
+                        scroll_a
+                      elsif scroll_b != 0
+                        scroll_b
+                      else
+                        scroll_a
+                      end
+                    else
+                      scroll_b
+                    end
 
-            if pixel
-              framebuffer[index] = pixel & 0x3F
+            if pixel != 0
+              framebuffer[index] = pixel
               drew = true
+            else
+              framebuffer[index] = backdrop
             end
 
             col_a += step_a
@@ -507,7 +506,92 @@ module MegaDrive
         screen_y += 1
       end
 
+      draw_sprites_over_scroll_fast(framebuffer)
       drew
+    end
+
+    def draw_sprites_over_scroll_fast(framebuffer)
+      vram = @vram
+      width = @screen_width
+      height = @screen_height
+      pixel_count = width * height
+      occupied = @sprite_occupied_cache
+      if !occupied || occupied.length != pixel_count
+        occupied = Array.new(pixel_count, 0)
+        @sprite_occupied_cache = occupied
+      end
+      stamp = ((@sprite_occupancy_stamp || 0) + 1) & 0x3FFF_FFFF
+      if stamp.zero?
+        occupied.fill(0)
+        stamp = 1
+      end
+      @sprite_occupancy_stamp = stamp
+
+      base = sprite_table_base
+      sprite = 0
+      80.times do
+        address = base + sprite * 8
+        y = (((vram[address & 0xFFFF] || 0) << 8) | (vram[(address ^ 1) & 0xFFFF] || 0)) & 0x03FF
+        size_address = (address + 2) & 0xFFFF
+        size_link = ((vram[size_address] || 0) << 8) | (vram[(size_address ^ 1) & 0xFFFF] || 0)
+        attr_address = (address + 4) & 0xFFFF
+        attr = ((vram[attr_address] || 0) << 8) | (vram[(attr_address ^ 1) & 0xFFFF] || 0)
+        x_address = (address + 6) & 0xFFFF
+        x = (((vram[x_address] || 0) << 8) | (vram[(x_address ^ 1) & 0xFFFF] || 0)) & 0x01FF
+        draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, x - 0x80, y - 0x80,
+          ((size_link >> 10) & 0x03) + 1, ((size_link >> 8) & 0x03) + 1, attr)
+        link = size_link & 0x7F
+        break if link.zero? || link == sprite
+
+        sprite = link
+      end
+    end
+
+    def draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, screen_x, screen_y, h_cells, v_cells, attr)
+      pattern = attr & 0x07FF
+      h_flip = (attr & 0x0800) != 0
+      v_flip = (attr & 0x1000) != 0
+      palette = (attr >> 9) & 0x30
+      priority = (attr & 0x8000) != 0
+      width = @screen_width
+      height = @screen_height
+
+      sy = 0
+      sprite_height = v_cells * 8
+      sprite_width = h_cells * 8
+      while sy < sprite_height
+        y = screen_y + sy
+        if y >= 0 && y < height
+          tile_y = sy >> 3
+          row = sy & 7
+          tile_y = v_cells - 1 - tile_y if v_flip
+          row = 7 - row if v_flip
+
+          sx = 0
+          while sx < sprite_width
+            x = screen_x + sx
+            if x >= 0 && x < width
+              tile_x = sx >> 3
+              col = sx & 7
+              tile_x = h_cells - 1 - tile_x if h_flip
+              col = 7 - col if h_flip
+              pixel = pattern_pixel(pattern + tile_x * v_cells + tile_y, row, col)
+              if pixel != 0
+                index = y * width + x
+                unless occupied[index] == stamp
+                  current = framebuffer[index] || 0
+                  if priority || (current & 0x100).zero?
+                    framebuffer[index] = (priority ? 0x100 : 0) | palette | pixel
+                  end
+                  occupied[index] = stamp
+                end
+              end
+            end
+            sx += 1
+          end
+        end
+        sy += 1
+      end
     end
 
     def plane_pixel(plane, source_x, source_y)
@@ -588,7 +672,14 @@ module MegaDrive
     end
 
     def sprite_pixels
-      pixels = Array.new(@screen_width * @screen_height)
+      pixel_count = @screen_width * @screen_height
+      pixels = @sprite_pixel_cache
+      if pixels&.length == pixel_count
+        pixels.fill(nil)
+      else
+        pixels = Array.new(pixel_count)
+        @sprite_pixel_cache = pixels
+      end
       base = sprite_table_base
       sprite = 0
       80.times do
