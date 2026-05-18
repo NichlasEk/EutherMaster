@@ -28,6 +28,8 @@ RSpec.describe 'Mega Drive audio' do
     ym2612 = MegaDrive::YM2612.new
     ym2612.write_address_1(0x4C)
     ym2612.write_data(0x00)
+    ym2612.write_address_1(0x5C)
+    ym2612.write_data(0x1F)
     ym2612.write_address_1(0xA0)
     ym2612.write_data(0x6A)
     ym2612.write_address_1(0xA4)
@@ -41,6 +43,32 @@ RSpec.describe 'Mega Drive audio' do
     samples = ym2612.render_frame_samples(128, 1_000)
 
     expect(samples.flatten.any? { |sample| sample.abs > 0.001 }).to be(true)
+  end
+
+  it 'releases YM2612 operators after key-off instead of leaving notes stuck' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0x4C)
+    ym2612.write_data(0x00)
+    ym2612.write_address_1(0x5C)
+    ym2612.write_data(0x1F)
+    ym2612.write_address_1(0x8C)
+    ym2612.write_data(0x0F)
+    ym2612.write_address_1(0xA0)
+    ym2612.write_data(0x6A)
+    ym2612.write_address_1(0xA4)
+    ym2612.write_data((4 << 3) | 0x02)
+    ym2612.begin_frame
+    ym2612.write_address_1(0x28)
+    ym2612.write_data(0x80)
+    keyed = ym2612.render_frame_samples(128, 1_000).flatten.map(&:abs).max
+
+    ym2612.begin_frame
+    ym2612.write_address_1(0x28)
+    ym2612.write_data(0x00)
+    released = ym2612.render_frame_samples(2_048, 16_000).flatten.last(512).map(&:abs).max
+
+    expect(keyed).to be > 0.001
+    expect(released).to be < keyed
   end
 
   it 'advances YM2612 timers and clears status flags through timer control' do
@@ -84,6 +112,42 @@ RSpec.describe 'Mega Drive audio' do
     ym2612.render_frame_samples(64, 1_000)
 
     expect(ym2612.read_register & 0x80).to eq(0)
+  end
+
+  it 'returns fresh YM2612 status only from the status port' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0xA0)
+    ym2612.write_data(0x34)
+
+    expect(ym2612.read_register(0x4001) & 0x80).to eq(0)
+    expect(ym2612.read_register(0x4000) & 0x80).to eq(0x80)
+    ym2612.tick(MegaDrive::YM2612::WRITE_BUSY_CYCLES)
+    expect(ym2612.read_register(0x4001) & 0x80).to eq(0x80)
+    expect(ym2612.read_register(0x4000) & 0x80).to eq(0)
+  end
+
+  it 'uses channel 3 special operator frequencies when YM2612 mode enables them' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0x27)
+    ym2612.write_data(0x40)
+    ym2612.write_address_1(0xA2)
+    ym2612.write_data(0x40)
+    ym2612.write_address_1(0xA6)
+    ym2612.write_data(4 << 3)
+    ym2612.write_address_1(0xA9)
+    ym2612.write_data(0xC0)
+    ym2612.write_address_1(0xAD)
+    ym2612.write_data(4 << 3)
+    ym2612.write_address_1(0xB2)
+    ym2612.write_data(0x07)
+    ym2612.begin_frame
+    ym2612.write_address_1(0x28)
+    ym2612.write_data(0xF2)
+
+    ym2612.render_frame_samples(64, 1_000)
+    phases = ym2612.instance_variable_get(:@phase)
+
+    expect(phases[8]).to be > phases[11]
   end
 
   it 'exposes combined MD audio through the existing PSG player hook' do
