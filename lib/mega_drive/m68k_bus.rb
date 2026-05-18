@@ -95,7 +95,10 @@ module MegaDrive
         @z80_bus_requested = (value & 0x01) != 0
       elsif z80_reset_address?(address)
         @z80_reset_asserted = (value & 0x01).zero?
-        @z80_cpu&.reset if @z80_reset_asserted
+        if @z80_reset_asserted
+          @z80_cpu&.reset
+          @ym2612&.reset
+        end
       elsif z80_ram_address?(address)
         write_z80_ram(address, value)
       elsif z80_bank_register_address?(address)

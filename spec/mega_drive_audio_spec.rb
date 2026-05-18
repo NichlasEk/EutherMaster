@@ -10,7 +10,7 @@ RSpec.describe 'Mega Drive audio' do
     expect(ym2612.registers[0][0xA0]).to eq(0x34)
     expect(ym2612.read_register & 0x80).to eq(0x80)
 
-    ym2612.tick(32)
+    ym2612.tick(MegaDrive::YM2612::WRITE_BUSY_CYCLES)
     expect(ym2612.read_register & 0x80).to eq(0)
   end
 
@@ -52,12 +52,38 @@ RSpec.describe 'Mega Drive audio' do
     ym2612.write_address_1(0x27)
     ym2612.write_data(0x05)
 
-    ym2612.tick(64)
+    ym2612.tick(MegaDrive::YM2612::TIMER_TICK_CYCLES)
     expect(ym2612.read_register & 0x01).to eq(0x01)
 
     ym2612.write_address_1(0x27)
     ym2612.write_data(0x10)
     expect(ym2612.read_register & 0x01).to eq(0)
+  end
+
+  it 'does not raise YM timer flags unless timer flag bits are enabled' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0x24)
+    ym2612.write_data(0xFF)
+    ym2612.write_address_1(0x25)
+    ym2612.write_data(0x03)
+    ym2612.write_address_1(0x27)
+    ym2612.write_data(0x01)
+
+    ym2612.tick(MegaDrive::YM2612::TIMER_TICK_CYCLES)
+
+    expect(ym2612.read_register & 0x01).to eq(0)
+  end
+
+  it 'does not let audio rendering roll back live YM busy and timer state' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.begin_frame
+    ym2612.write_address_1(0xA0)
+    ym2612.write_data(0x34)
+    ym2612.tick(MegaDrive::YM2612::WRITE_BUSY_CYCLES)
+
+    ym2612.render_frame_samples(64, 1_000)
+
+    expect(ym2612.read_register & 0x80).to eq(0)
   end
 
   it 'exposes combined MD audio through the existing PSG player hook' do
@@ -116,6 +142,16 @@ RSpec.describe 'Mega Drive audio' do
     emulator.bus.run_z80_cycles(32)
 
     expect(emulator.z80_cpu.pc).to eq(0)
+  end
+
+  it 'resets the YM2612 when the Z80 reset line is asserted' do
+    emulator = MegaDrive::Emulator.new
+    emulator.ym2612.write_address_1(0xA0)
+    emulator.ym2612.write_data(0x34)
+
+    emulator.bus.write_byte(0xA11200, 0x00)
+
+    expect(emulator.ym2612.registers[0][0xA0]).to eq(0)
   end
 
   it 'routes 68k-side VDP ports to the Mega Drive VDP' do

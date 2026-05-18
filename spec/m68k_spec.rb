@@ -584,6 +584,19 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.d[1]).to eq(0x1234_5678)
   end
 
+  it 'writes LEA results to A7 as the active stack pointer' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4FEF, 0x0010 # LEA 16(A7),A7
+    ])
+    bus.write_long(cpu.ssp + 0x10, 0x1234_5678)
+
+    cpu.step
+
+    expect(cpu.ssp).to eq(0x00FF_0010)
+    expect(bus.read_long(cpu.ssp)).to eq(0x1234_5678)
+  end
+
   it 'handles address-register indexed effective addresses' do
     reset_to(0x100)
     load_program(0x100, [

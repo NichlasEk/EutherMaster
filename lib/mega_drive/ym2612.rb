@@ -5,6 +5,8 @@ module MegaDrive
     OPERATORS = 4
     SAMPLE_RATE = 44_100
     TWO_PI = Math::PI * 2.0
+    WRITE_BUSY_CYCLES = 1_344
+    TIMER_TICK_CYCLES = 72
 
     VOLUME_TABLE = Array.new(128) { |tl| 10.0**(-tl / 20.0) }.freeze
 
@@ -86,7 +88,7 @@ module MegaDrive
       @write_log << { index: @writes, port: port, reg: reg, value: value, cycle: cycle&.to_i } if log
       @write_log.shift while @write_log.length > 512
       @frame_writes << { port: port, reg: reg, value: value, cycle: cycle.to_i } if log && @frame_writes
-      @busy_cycles = 32
+      @busy_cycles = WRITE_BUSY_CYCLES
       apply_register(port, reg, value)
     end
 
@@ -99,6 +101,7 @@ module MegaDrive
     def render_frame_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
       writes = @frame_writes || []
       write_index = 0
+      live_state = capture_render_state
       restore_render_state(@frame_start_state || capture_render_state)
       samples = Array.new(count) { [0.0, 0.0] }
 
@@ -112,6 +115,11 @@ module MegaDrive
         samples[sample_index] = render_sample(sample_rate)
       end
 
+      rendered_phase = @phase.dup
+      rendered_envelope = @envelope.dup
+      restore_render_state(live_state)
+      @phase = rendered_phase
+      @envelope = rendered_envelope
       samples
     end
 
@@ -181,29 +189,29 @@ module MegaDrive
     end
 
     def tick_timers(cycles)
-      if (@timer_control & 0x04) != 0
+      if (@timer_control & 0x01) != 0
         @timer_a_counter -= cycles
         if @timer_a_counter <= 0
-          @status |= 0x01
+          @status |= 0x01 if (@timer_control & 0x04) != 0
           load_timer_a
         end
       end
 
-      return if (@timer_control & 0x08).zero?
+      return if (@timer_control & 0x02).zero?
 
       @timer_b_counter -= cycles
       return unless @timer_b_counter <= 0
 
-      @status |= 0x02
+      @status |= 0x02 if (@timer_control & 0x08) != 0
       load_timer_b
     end
 
     def load_timer_a
-      @timer_a_counter = [(1024 - (@timer_a_latch & 0x3FF)) * 18, 18].max
+      @timer_a_counter = [(1024 - (@timer_a_latch & 0x3FF)) * TIMER_TICK_CYCLES, TIMER_TICK_CYCLES].max
     end
 
     def load_timer_b
-      @timer_b_counter = [(256 - (@timer_b_latch & 0xFF)) * 288, 288].max
+      @timer_b_counter = [(256 - (@timer_b_latch & 0xFF)) * 16 * TIMER_TICK_CYCLES, 16 * TIMER_TICK_CYCLES].max
     end
 
     def write_operator_register(port, reg, value)

@@ -846,7 +846,7 @@ module MegaDrive
       dest = (opcode >> 9) & 0x07
       mode = (opcode >> 3) & 0x07
       reg = opcode & 0x07
-      @a[dest] = effective_address(mode, reg, SIZE_LONG) & 0xFFFF_FFFF
+      write_address_register(dest, effective_address(mode, reg, SIZE_LONG))
       finish(4)
     end
 
