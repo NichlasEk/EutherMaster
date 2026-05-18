@@ -150,6 +150,8 @@ module MegaDrive
     end
 
     def render_frame
+      return unless @video_dirty
+
       draw_scroll_planes
     end
 

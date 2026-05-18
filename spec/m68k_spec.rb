@@ -135,6 +135,21 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_c?).to be true
   end
 
+  it 'coalesces absolute-long TST busy-wait branches' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4A39, 0x00FF, 0x0006, # TST.B $FF0006
+      0x66F8                  # BNE back to TST
+    ])
+    bus.write_byte(0xFF0006, 1)
+
+    cpu.step
+    cpu.step
+
+    expect(cpu.pc).to eq(0x100)
+    expect(cpu.cycles).to eq(MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES)
+  end
+
   it 'keeps sign-extended absolute-short LEA values in address registers' do
     reset_to(0x100)
     load_program(0x100, [

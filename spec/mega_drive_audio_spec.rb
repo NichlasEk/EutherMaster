@@ -251,6 +251,16 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.vdp.framebuffer).to equal(emulator.framebuffer)
   end
 
+  it 'skips clean Mega Drive VDP redraws' do
+    vdp = MegaDrive::VDP.new
+
+    vdp.render_frame
+    version = vdp.render_version
+    vdp.render_frame
+
+    expect(vdp.render_version).to eq(version)
+  end
+
   it 'renders scroll-plane tiles before CRAM has been populated' do
     vdp = MegaDrive::VDP.new
     vdp.write_control(0x8144)
