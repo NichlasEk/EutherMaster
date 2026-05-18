@@ -801,13 +801,14 @@ module AstralVerse
       end
 
       def toggle_start
-        if !@stone.instance_variable_get(:@codex_present)
-          armed_relic_path ? load_selected_relic(armed_relic_path) : open_browser
-          @running = true if @stone.instance_variable_get(:@codex_present)
-        else
-          @running = !@running
-          @audio_player&.stop unless @running
+        path = armed_relic_path
+        unless path
+          open_browser
+          return
         end
+
+        load_selected_relic(path, autostart: true)
+        @running = true if @stone.instance_variable_get(:@codex_present)
       end
 
       def save_state

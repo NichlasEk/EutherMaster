@@ -760,7 +760,7 @@ module MegaDrive
       address_reg = opcode & 0x07
       size = (opcode & 0x0040) != 0 ? SIZE_LONG : SIZE_WORD
       register_to_memory = (opcode & 0x0080) != 0
-      address = (read_address_register(address_reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+      address = (read_address_register(address_reg) + sign_extend(fetch_word, 16)) & 0xFFFF_FFFF
 
       if register_to_memory
         value = @d[data_reg]
@@ -958,12 +958,12 @@ module MegaDrive
       when 4
         read_address_register(reg)
       when 5
-        (read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+        (read_address_register(reg) + sign_extend(fetch_word, 16)) & 0xFFFF_FFFF
       when 6
         address_index_address(reg)
       when 7
         case reg
-        when 0 then sign_extend(fetch_word, 16) & ADDRESS_MASK
+        when 0 then sign_extend(fetch_word, 16) & 0xFFFF_FFFF
         when 1 then fetch_long
         when 2 then pc_displacement_address
         when 3 then pc_index_address
@@ -988,12 +988,12 @@ module MegaDrive
         write_address_register(reg, address)
         address
       when 5
-        (read_address_register(reg) + sign_extend(fetch_word, 16)) & ADDRESS_MASK
+        (read_address_register(reg) + sign_extend(fetch_word, 16)) & 0xFFFF_FFFF
       when 6
         address_index_address(reg)
       when 7
         case reg
-        when 0 then sign_extend(fetch_word, 16) & ADDRESS_MASK
+        when 0 then sign_extend(fetch_word, 16) & 0xFFFF_FFFF
         when 1 then fetch_long
         else
           raise NotImplementedError, "M68K writable EA mode 7/#{reg}"

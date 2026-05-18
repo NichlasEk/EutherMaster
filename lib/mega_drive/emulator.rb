@@ -93,6 +93,7 @@ module MegaDrive
       end
       @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
       @bus.run_z80_cycles(z80_pending) if z80_pending.positive?
+      @z80_cpu.interrupt(0xFF) if @bus.z80_running?
       cpu_finished = monotonic_time
       @vdp.end_vblank!
       @vdp.render_frame

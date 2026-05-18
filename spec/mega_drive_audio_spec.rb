@@ -103,16 +103,73 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_byte(0xA11100) & 0x01).to eq(0)
   end
 
-  it 'maps 68k-side writes into Z80 RAM' do
+  it 'maps 68k-side byte writes into mirrored Z80 RAM' do
+    emulator = MegaDrive::Emulator.new
+
+    emulator.bus.write_byte(0xA00000, 0x3E)
+    emulator.bus.write_byte(0xA02001, 0xA0)
+    emulator.bus.write_byte(0xA00002, 0x32)
+    emulator.bus.write_byte(0xA02003, 0x00)
+
+    expect(emulator.z80_bus.read_byte(0x0000)).to eq(0x3E)
+    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
+    expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
+    expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
+  end
+
+  it 'maps 68k-side word writes into Z80 RAM as high-byte-only writes' do
     emulator = MegaDrive::Emulator.new
 
     emulator.bus.write_word(0xA00000, 0x3EA0)
     emulator.bus.write_word(0xA00002, 0x3200)
 
     expect(emulator.z80_bus.read_byte(0x0000)).to eq(0x3E)
-    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
+    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0x00)
     expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
     expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
+    expect(emulator.bus.read_word(0xA00000)).to eq(0x3E3E)
+  end
+
+  it 'leaves Mega Drive Z80 I/O ports unwired' do
+    emulator = MegaDrive::Emulator.new
+
+    emulator.z80_bus.write_io(0x7F11, 0x9F)
+
+    expect(emulator.z80_bus.read_io(0x7F11)).to eq(0xFF)
+    expect(emulator.instance_variable_get(:@sms_psg).writes).to eq(0)
+  end
+
+  it 'pulses the Mega Drive Z80 IM1 interrupt once per frame' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00]
+    emulator.load_rom_data(rom)
+    program = [
+      0xF3,             # DI
+      0x31, 0xFD, 0x1F, # LD SP,$1FFD
+      0xED, 0x56,       # IM 1
+      0x3E, 0x00,       # LD A,0
+      0x32, 0x00, 0x10, # LD ($1000),A
+      0xFB,             # EI
+      0x18, 0xFE        # JR $
+    ]
+    isr = [
+      0x3A, 0x00, 0x10, # LD A,($1000)
+      0x3C,             # INC A
+      0x32, 0x00, 0x10, # LD ($1000),A
+      0xFB,             # EI
+      0xC9              # RET
+    ]
+    program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
+    isr.each_with_index { |byte, index| emulator.bus.write_byte(0xA00038 + index, byte) }
+    emulator.bus.write_byte(0xA11200, 0x01)
+
+    4.times do
+      emulator.bus.run_z80_cycles(200)
+      emulator.z80_cpu.interrupt(0xFF)
+    end
+
+    expect(emulator.z80_bus.read_byte(0x1000)).to be > 0
   end
 
   it 'runs Z80 audio code against memory-mapped YM2612 ports' do
@@ -290,6 +347,14 @@ RSpec.describe 'Mega Drive audio' do
 
     vdp.end_vblank!
     expect(vdp.read_control & 0x0080).to eq(0)
+  end
+
+  it 'reports HBlank while a Mega Drive VBlank interrupt is pending' do
+    vdp = MegaDrive::VDP.new
+
+    vdp.request_vblank!
+
+    expect(vdp.read_control & 0x0008).to eq(0x0008)
   end
 
   it 'renders basic sprites from the sprite attribute table' do

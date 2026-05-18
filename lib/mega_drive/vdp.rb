@@ -83,7 +83,7 @@ module MegaDrive
 
     def read_control
       @control_pending = false
-      hblank? ? (@status | 0x0008) : (@status & ~0x0008)
+      hblank_status? ? (@status | 0x0008) : (@status & ~0x0008)
     end
 
     def write_data(value)
@@ -218,6 +218,10 @@ module MegaDrive
     def hblank?
       cycle = @bus&.respond_to?(:frame_cycle) ? @bus.frame_cycle.to_i : 0
       (cycle % 228) >= 170
+    end
+
+    def hblank_status?
+      hblank? || (@status & 0x0080) != 0
     end
 
     def dma_enabled?

@@ -28,6 +28,8 @@ module MegaDrive
         @ram[address & RAM_MASK]
       when 0x4000..0x5FFF
         @ym2612.read_register(address)
+      when 0x6000..0x7FFF
+        0xFF
       when 0x8000..0xFFFF
         @m68k_bus ? @m68k_bus.read_byte(banked_68k_address(address)) : 0xFF
       else
@@ -43,21 +45,20 @@ module MegaDrive
         @ram[address & RAM_MASK] = value
       when 0x4000..0x5FFF
         @ym2612.write_port(address & 0x03, value, cycle: @frame_cycle)
-      when 0x6000..0x7EFF
+      when 0x6000..0x60FF
         @bank_register = ((@bank_register >> 1) | ((value & 1) << 8)) & 0x1FF
-      when 0x7F00..0x7FFF
+      when 0x7F00..0x7F1F
         @psg.write(value, port: address & 0xFF, cycle: @frame_cycle)
       when 0x8000..0xFFFF
         @m68k_bus&.write_byte(banked_68k_address(address), value)
       end
     end
 
-    def read_io(port)
-      read_byte(port & 0xFFFF)
+    def read_io(_port)
+      0xFF
     end
 
-    def write_io(port, value)
-      write_byte(port & 0xFFFF, value)
+    def write_io(_port, _value)
     end
 
     private

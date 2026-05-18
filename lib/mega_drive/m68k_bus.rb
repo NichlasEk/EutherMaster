@@ -57,7 +57,7 @@ module MegaDrive
       return @controller ? @controller.read_control : 0x00 if io_pair?(address, IO_PORT_1_CONTROL_BASE)
       return z80_bus_request_status if z80_bus_request_address?(address)
       return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
-      return read_z80_ram(address) if z80_ram_address?(address)
+      return read_z80_ram(address) if z80_ram_mirror_address?(address)
       return @work_ram[address & WORK_RAM_MASK] if work_ram_address?(address)
       return @rom[address % @rom.length] if cartridge_rom_address?(address)
 
@@ -68,6 +68,7 @@ module MegaDrive
       address &= ADDRESS_MASK
       return @vdp.read_data if vdp_data_address?(address)
       return @vdp.read_control if vdp_control_address?(address)
+      return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
       return read_byte(address) if io_address?(address)
 
       ((read_byte(address) << 8) | read_byte(address + 1)) & 0xFFFF
@@ -99,7 +100,7 @@ module MegaDrive
           @z80_cpu&.reset
           @ym2612&.reset
         end
-      elsif z80_ram_address?(address)
+      elsif z80_ram_mirror_address?(address)
         write_z80_ram(address, value)
       elsif z80_bank_register_address?(address)
         @z80_bus&.write_byte(0x6000, value)
@@ -120,6 +121,9 @@ module MegaDrive
         return
       elsif vdp_control_address?(address)
         @vdp.write_control(value)
+        return
+      elsif z80_ram_mirror_address?(address)
+        write_z80_ram(address, (value >> 8) & 0xFF)
         return
       end
 
@@ -175,8 +179,8 @@ module MegaDrive
       (address & 0x00FF_FF00) == Z80_RESET && (address & 1).zero?
     end
 
-    def z80_ram_address?(address)
-      @z80_bus && address >= Z80_RAM_BASE && address <= Z80_RAM_END
+    def z80_ram_mirror_address?(address)
+      @z80_bus && address >= Z80_RAM_BASE && address < YM2612_BASE
     end
 
     def z80_bank_register_address?(address)
@@ -207,6 +211,11 @@ module MegaDrive
 
     def read_z80_ram(address)
       @z80_bus.read_byte(address & 0x1FFF)
+    end
+
+    def mirrored_z80_word(address)
+      value = read_z80_ram(address)
+      (value << 8) | value
     end
 
     def write_z80_ram(address, value)

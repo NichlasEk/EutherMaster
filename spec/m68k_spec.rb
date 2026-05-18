@@ -135,6 +135,19 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_c?).to be true
   end
 
+  it 'keeps sign-extended absolute-short LEA values in address registers' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x41F8, 0x89E8, # LEA $89E8.w,A0
+      0x43E8, 0x0016  # LEA 16(A0),A1
+    ])
+
+    2.times { cpu.step }
+
+    expect(cpu.a[0]).to eq(0xFFFF_89E8)
+    expect(cpu.a[1]).to eq(0xFFFF_89FE)
+  end
+
   it 'does not consume absolute destination extensions twice for quick memory ops' do
     reset_to(0x100)
     load_program(0x100, [
