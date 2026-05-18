@@ -334,7 +334,6 @@ module MegaDrive
     def draw_scroll_planes
       ensure_framebuffer_size
       backdrop = color_index(@registers[7] & 0x3F)
-      @framebuffer.fill(backdrop)
       drew = !display_enabled?
       rendered_display = false
 
@@ -344,8 +343,11 @@ module MegaDrive
         drew = if fast_scroll_renderer?
                  draw_scroll_planes_fast
                else
+                 @framebuffer.fill(backdrop)
                  draw_scroll_planes_generic
                end
+      else
+        @framebuffer.fill(backdrop)
       end
 
       draw_vram_activity_frame unless drew || rendered_display
@@ -400,12 +402,16 @@ module MegaDrive
       width_cells, height_cells = @plane_dimensions_cache
       map_width = width_cells * 8
       map_height = height_cells * 8
+      map_width_mask = map_width - 1
+      map_height_mask = map_height - 1
       plane_a = plane_a_base
       plane_b = plane_b_base
       h_scroll_a = @h_scroll_a_cache
       h_scroll_b = @h_scroll_b_cache
       v_scroll_a = @v_scroll_a_cache
       v_scroll_b = @v_scroll_b_cache
+      v_scroll_a_single = @v_scroll_a_single_cache
+      v_scroll_b_single = @v_scroll_b_single_cache
       drew = false
       backdrop = color_index(@registers[7] & 0x3F)
 
@@ -414,11 +420,13 @@ module MegaDrive
         row_offset = screen_y * width
         ha = h_scroll_a[screen_y]
         hb = h_scroll_b[screen_y]
+        sy_a_row = ((screen_y + v_scroll_a_single) & map_height_mask) if v_scroll_a_single
+        sy_b_row = ((screen_y + v_scroll_b_single) & map_height_mask) if v_scroll_b_single
         screen_x = 0
         while screen_x < width
           column = screen_x >> 4
-          sy_b = (screen_y + v_scroll_b[column]) % map_height
-          sx_b = (screen_x - hb) % map_width
+          sy_b = sy_b_row || ((screen_y + v_scroll_b[column]) & map_height_mask)
+          sx_b = (screen_x - hb) & map_width_mask
           cell_y_b = sy_b >> 3
           cell_x_b = sx_b >> 3
           address_b = (plane_b + ((2 * (cell_y_b * width_cells + cell_x_b)) & 0x1FFF)) & 0xFFFF
@@ -441,8 +449,8 @@ module MegaDrive
           limit_b = step_b.positive? ? 8 - col_b : col_b + 1
           attr_b = ((entry_b & 0x8000) != 0 ? 0x100 : 0) | ((entry_b >> 9) & 0x30)
 
-          sy_a = (screen_y + v_scroll_a[column]) % map_height
-          sx_a = (screen_x - ha) % map_width
+          sy_a = sy_a_row || ((screen_y + v_scroll_a[column]) & map_height_mask)
+          sx_a = (screen_x - ha) & map_width_mask
           cell_y_a = sy_a >> 3
           cell_x_a = sx_a >> 3
           address_a = (plane_a + ((2 * (cell_y_a * width_cells + cell_x_a)) & 0x1FFF)) & 0xFFFF
@@ -778,6 +786,8 @@ module MegaDrive
       columns = (width + 15) / 16
       @v_scroll_a_cache = Array.new(columns) { |column| v_scroll_value_for_column(:a, column) }
       @v_scroll_b_cache = Array.new(columns) { |column| v_scroll_value_for_column(:b, column) }
+      @v_scroll_a_single_cache = single_value(@v_scroll_a_cache)
+      @v_scroll_b_single_cache = single_value(@v_scroll_b_cache)
       @window_range_cache = Array.new(height) { |y| window_range(y) }
       @window_enabled_cache = @window_range_cache.any? { |range| range && range[1] > range[0] }
       unless @pattern_row_cache_packed && @pattern_row_cache&.length == 0x800 * 8
@@ -788,6 +798,17 @@ module MegaDrive
 
     def invalidate_pattern_row(address)
       @pattern_row_cache[address >> 2] = nil if @pattern_row_cache
+    end
+
+    def single_value(values)
+      first = values[0]
+      index = 1
+      while index < values.length
+        return nil if values[index] != first
+
+        index += 1
+      end
+      first
     end
 
     def source_cache(cache, output_size, input_size)
