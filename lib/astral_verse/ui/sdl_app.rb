@@ -812,7 +812,7 @@ module AstralVerse
       end
 
       def save_state
-        path = @stone.save_snapshot
+        path = @stone.save_snapshot(@stone.current_snapshot_path)
         flash_status("Saved #{File.basename(path)}")
       rescue => e
         flash_status("Save failed: #{e.message}")
@@ -822,7 +822,9 @@ module AstralVerse
         was_running = @running
         @running = false
         @audio_player&.stop
-        path = @stone.load_snapshot
+        path = @stone.current_snapshot_path
+        path = @stone.class.default_snapshot_path unless File.exist?(path)
+        path = @stone.load_snapshot(path)
         apply_console_region
         @audio_player = build_audio_player
         @frame_count = @stone.emulator.frame_count

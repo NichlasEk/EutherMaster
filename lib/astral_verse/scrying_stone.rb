@@ -109,6 +109,7 @@ module AstralVerse
     def save_snapshot(path = self.class.default_snapshot_path)
       raise "No relic loaded" unless @codex_present
 
+      path ||= self.class.default_snapshot_path
       FileUtils.mkdir_p(File.dirname(path))
       payload = {
         version: SNAPSHOT_VERSION,
@@ -126,6 +127,7 @@ module AstralVerse
     end
 
     def load_snapshot(path = self.class.default_snapshot_path)
+      path ||= self.class.default_snapshot_path
       payload = Marshal.load(File.binread(path))
       unless payload.is_a?(Hash) && payload[:version] == SNAPSHOT_VERSION
         raise "Unsupported snapshot format"
@@ -145,6 +147,18 @@ module AstralVerse
 
     def self.default_snapshot_path
       File.expand_path(File.join('snapshots', 'quick.state'), Dir.pwd)
+    end
+
+    def current_snapshot_path
+      relic_path = @crystal_vault.relic_path
+      return self.class.default_snapshot_path unless relic_path && !relic_path.empty?
+
+      self.class.snapshot_path_for_relic(relic_path)
+    end
+
+    def self.snapshot_path_for_relic(relic_path)
+      expanded = File.expand_path(relic_path)
+      File.join(File.dirname(expanded), "#{File.basename(expanded, '.*')}.GemShard")
     end
 
     def sync_controller

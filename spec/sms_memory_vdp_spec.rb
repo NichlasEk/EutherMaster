@@ -451,4 +451,19 @@ RSpec.describe AstralVerse::ScryingStone do
       expect(stone.vision_sprite.scrying_pool).to eq(stone.emulator.vdp.framebuffer)
     end
   end
+
+  it 'uses a per-ROM GemShard snapshot path beside the loaded ROM' do
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'DeathDuel.md')
+      File.binwrite(rom_path, [0x00, 0x76].pack('C*'))
+      stone = described_class.new
+      stone.absorb_codex(rom_path)
+
+      expect(stone.current_snapshot_path).to eq(File.join(dir, 'DeathDuel.GemShard'))
+
+      path = stone.save_snapshot(stone.current_snapshot_path)
+      expect(path).to eq(File.join(dir, 'DeathDuel.GemShard'))
+      expect(File.exist?(path)).to be(true)
+    end
+  end
 end

@@ -18,10 +18,11 @@ module MegaDrive
     IO_PORT_1_DATA_BASE = 0x00A1_0002
     IO_PORT_1_CONTROL_BASE = 0x00A1_0008
     VDP_BASE = 0x00C0_0000
+    VDP_HV_COUNTER = 0x00C0_0008
     WORK_RAM_BASE = 0x00E0_0000
     WORK_RAM_MASK = 0x0000_FFFF
 
-    attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :version_register
+    attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
 
     def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, z80_bus: nil, z80_cpu: nil)
       @memory = Array.new(size, 0)
@@ -37,6 +38,7 @@ module MegaDrive
       @z80_bus_requested = false
       @z80_reset_asserted = true
       @frame_cycle = 0
+      @ym_frame_cycle = 0
       @version_register = 0xA0
     end
 
@@ -52,6 +54,7 @@ module MegaDrive
     def read_byte(address)
       address &= ADDRESS_MASK
       return @ym2612.read_register(address) if ym2612_address?(address)
+      return read_vdp_hv_counter_byte(address) if vdp_hv_counter_address?(address)
       return @version_register if io_pair?(address, IO_VERSION_BASE)
       return @controller ? @controller.read_data : 0x7F if io_pair?(address, IO_PORT_1_DATA_BASE)
       return @controller ? @controller.read_control : 0x00 if io_pair?(address, IO_PORT_1_CONTROL_BASE)
@@ -68,6 +71,7 @@ module MegaDrive
       address &= ADDRESS_MASK
       return @vdp.read_data if vdp_data_address?(address)
       return @vdp.read_control if vdp_control_address?(address)
+      return @vdp.read_hv_counter if vdp_hv_counter_address?(address)
       return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
       return read_byte(address) if io_address?(address)
 
@@ -83,7 +87,7 @@ module MegaDrive
       value &= 0xFF
 
       if ym2612_address?(address)
-        @ym2612.write_port(address & 0x03, value, cycle: @frame_cycle)
+        @ym2612.write_port(address & 0x03, value, cycle: @ym_frame_cycle)
       elsif vdp_data_address?(address)
         @vdp.write_data_byte(address, value)
       elsif vdp_control_address?(address)
@@ -151,6 +155,7 @@ module MegaDrive
       return 0 unless z80_running?
 
       @z80_bus.frame_cycle = @frame_cycle
+      @z80_bus.ym_frame_cycle = @ym_frame_cycle
       @z80_cpu.run_cycles(cycles.to_i)
     rescue NotImplementedError
       0
@@ -158,7 +163,11 @@ module MegaDrive
 
     def begin_frame
       @frame_cycle = 0
-      @z80_bus.frame_cycle = 0 if @z80_bus
+      @ym_frame_cycle = 0
+      if @z80_bus
+        @z80_bus.frame_cycle = 0
+        @z80_bus.ym_frame_cycle = 0
+      end
     end
 
     private
@@ -177,6 +186,15 @@ module MegaDrive
 
     def z80_reset_address?(address)
       (address & 0x00FF_FF00) == Z80_RESET && (address & 1).zero?
+    end
+
+    def vdp_hv_counter_address?(address)
+      @vdp && (address & 0x00FF_FFFE) == VDP_HV_COUNTER
+    end
+
+    def read_vdp_hv_counter_byte(address)
+      word = @vdp.read_hv_counter
+      address.even? ? ((word >> 8) & 0xFF) : (word & 0xFF)
     end
 
     def z80_ram_mirror_address?(address)

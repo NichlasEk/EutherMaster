@@ -7,6 +7,7 @@ module MegaDrive
     Z80_CLOCK = 3_579_545
     AUDIO_CYCLES_PER_FRAME = 59_736
     Z80_BATCH_CYCLES = 128
+    VBLANK_START_CYCLES = (CYCLES_PER_FRAME * MegaDrive::VDP::VBLANK_START_CYCLE).fdiv(AUDIO_CYCLES_PER_FRAME).ceil
 
     def initialize
       @timing_mode = :auto
@@ -68,20 +69,28 @@ module MegaDrive
       steps = 0
       z80_remainder = 0
       z80_pending = 0
+      vblank_requested = false
       @audio.begin_frame
       @bus.begin_frame
-      @vdp.request_vblank!
       while cycles < CYCLES_PER_FRAME
         begin
           @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
+          @bus.ym_frame_cycle = cycles
           step_cycles = @cpu.step
           cycles += step_cycles
           @ym2612.tick(step_cycles)
+          if !vblank_requested && cycles >= VBLANK_START_CYCLES
+            @bus.frame_cycle = MegaDrive::VDP::VBLANK_START_CYCLE
+            @vdp.request_vblank!
+            vblank_requested = true
+            cycles = VBLANK_START_CYCLES
+          end
           z80_total = step_cycles * Z80_CLOCK + z80_remainder
           z80_cycles = z80_total / M68K_CLOCK
           z80_remainder = z80_total % M68K_CLOCK
           z80_pending += z80_cycles
           @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
+          @bus.ym_frame_cycle = cycles
           if z80_pending >= Z80_BATCH_CYCLES
             @bus.run_z80_cycles(z80_pending)
             z80_pending = 0
@@ -92,6 +101,8 @@ module MegaDrive
         end
       end
       @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
+      @bus.ym_frame_cycle = CYCLES_PER_FRAME
+      @vdp.request_vblank! unless vblank_requested
       @bus.run_z80_cycles(z80_pending) if z80_pending.positive?
       @z80_cpu.interrupt(0xFF) if @bus.z80_running?
       cpu_finished = monotonic_time

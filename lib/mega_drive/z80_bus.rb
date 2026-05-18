@@ -4,7 +4,7 @@ module MegaDrive
     RAM_MASK = RAM_SIZE - 1
 
     attr_reader :ram
-    attr_accessor :frame_cycle, :m68k_bus
+    attr_accessor :frame_cycle, :ym_frame_cycle, :m68k_bus
 
     def initialize(psg:, ym2612:, m68k_bus: nil)
       @ram = Array.new(RAM_SIZE, 0)
@@ -13,12 +13,14 @@ module MegaDrive
       @m68k_bus = m68k_bus
       @bank_register = 0
       @frame_cycle = 0
+      @ym_frame_cycle = 0
     end
 
     def reset
       @ram.fill(0)
       @bank_register = 0
       @frame_cycle = 0
+      @ym_frame_cycle = 0
     end
 
     def read_byte(address)
@@ -44,7 +46,7 @@ module MegaDrive
       when 0x0000..0x3FFF
         @ram[address & RAM_MASK] = value
       when 0x4000..0x5FFF
-        @ym2612.write_port(address & 0x03, value, cycle: @frame_cycle)
+        @ym2612.write_port(address & 0x03, value, cycle: @ym_frame_cycle)
       when 0x6000..0x60FF
         @bank_register = ((@bank_register >> 1) | ((value & 1) << 8)) & 0x1FF
       when 0x7F00..0x7F1F

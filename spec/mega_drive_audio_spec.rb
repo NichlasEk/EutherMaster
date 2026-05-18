@@ -425,10 +425,22 @@ RSpec.describe 'Mega Drive audio' do
 
   it 'reports HBlank while a Mega Drive VBlank interrupt is pending' do
     vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+    bus.frame_cycle = MegaDrive::VDP::VBLANK_START_CYCLE
 
     vdp.request_vblank!
 
+    expect(vdp.read_control & 0x0004).to eq(0x0004)
     expect(vdp.read_control & 0x0008).to eq(0x0008)
+  end
+
+  it 'exposes the Mega Drive VDP H/V counter at $C00008' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+    bus.frame_cycle = MegaDrive::VDP::LINE_CYCLES * 0xE0
+
+    expect(bus.read_byte(0xC00008)).to eq(0xE0)
+    expect(bus.read_word(0xC00008) >> 8).to eq(0xE0)
   end
 
   it 'renders basic sprites from the sprite attribute table' do

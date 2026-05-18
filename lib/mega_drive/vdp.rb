@@ -6,6 +6,11 @@ module MegaDrive
     CRAM_SIZE = 0x40
     VSRAM_SIZE = 0x40
     NUM_REGISTERS = 0x20
+    LINE_CYCLES = 228
+    VISIBLE_LINES = 224
+    TOTAL_LINES = 262
+    FRAME_CYCLES = LINE_CYCLES * TOTAL_LINES
+    VBLANK_START_CYCLE = LINE_CYCLES * VISIBLE_LINES
 
     attr_reader :registers, :vram, :cram, :vsram, :framebuffer, :render_version,
                 :screen_width, :screen_height
@@ -37,6 +42,7 @@ module MegaDrive
       @pattern_row_cache_packed = true
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
+      @vblank_counter_pending = false
     end
 
     def reset
@@ -65,6 +71,7 @@ module MegaDrive
       @pattern_row_cache_packed = true
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
+      @vblank_counter_pending = false
     end
 
     def read_data
@@ -83,7 +90,18 @@ module MegaDrive
 
     def read_control
       @control_pending = false
-      hblank_status? ? (@status | 0x0008) : (@status & ~0x0008)
+      status = @status
+      status = vblank? ? (status | 0x0008) : (status & ~0x0008)
+      hblank_status? ? (status | 0x0004) : (status & ~0x0004)
+    end
+
+    def read_hv_counter
+      v = v_counter
+      if @vblank_counter_pending
+        v = 0xE0
+        @vblank_counter_pending = false
+      end
+      ((v << 8) | h_counter) & 0xFFFF
     end
 
     def write_data(value)
@@ -157,6 +175,7 @@ module MegaDrive
 
     def request_vblank!
       @status |= 0x0080
+      @vblank_counter_pending = true
       @irq_level = 6
     end
 
@@ -219,11 +238,26 @@ module MegaDrive
 
     def hblank?
       cycle = @bus&.respond_to?(:frame_cycle) ? @bus.frame_cycle.to_i : 0
-      (cycle % 228) >= 170
+      (cycle % LINE_CYCLES) >= 170
+    end
+
+    def vblank?
+      cycle = @bus&.respond_to?(:frame_cycle) ? @bus.frame_cycle.to_i : 0
+      cycle >= VBLANK_START_CYCLE
     end
 
     def hblank_status?
-      hblank? || (@status & 0x0080) != 0
+      hblank? || vblank?
+    end
+
+    def v_counter
+      cycle = @bus&.respond_to?(:frame_cycle) ? @bus.frame_cycle.to_i : 0
+      (cycle / LINE_CYCLES).clamp(0, TOTAL_LINES - 1) & 0xFF
+    end
+
+    def h_counter
+      cycle = @bus&.respond_to?(:frame_cycle) ? @bus.frame_cycle.to_i : 0
+      ((cycle % LINE_CYCLES) * 342 / LINE_CYCLES).clamp(0, 0xFF)
     end
 
     def dma_enabled?
