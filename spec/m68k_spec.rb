@@ -149,6 +149,22 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.pc).to eq(0x104)
   end
 
+  it 'updates postincrement effective addresses for quick memory ops' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x41F8, 0x0200, # LEA $0200,A0
+      0x5458          # ADDQ.W #2,(A0)+
+    ])
+    bus.write_word(0x200, 0x0004)
+    bus.write_word(0x202, 0x0010)
+
+    2.times { cpu.step }
+
+    expect(bus.read_word(0x200)).to eq(0x0006)
+    expect(bus.read_word(0x202)).to eq(0x0010)
+    expect(cpu.a[0]).to eq(0x202)
+  end
+
   it 'tests memory values without changing X' do
     reset_to(0x100)
     load_program(0x100, [
@@ -220,6 +236,21 @@ RSpec.describe MegaDrive::M68K do
     3.times { cpu.step }
 
     expect(cpu.d[0]).to eq(0x03)
+    expect(cpu.flag_z?).to be true
+  end
+
+  it 'preserves extend through compare operations' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x46FC, 0x2010, # MOVE #$2010,SR
+      0x7003,         # MOVEQ #3,D0
+      0x0C00, 0x04,   # CMPI.B #$04,D0
+      0xB03C, 0x03    # CMP.B #$03,D0
+    ])
+
+    4.times { cpu.step }
+
+    expect(cpu.flag_x?).to be true
     expect(cpu.flag_z?).to be true
   end
 

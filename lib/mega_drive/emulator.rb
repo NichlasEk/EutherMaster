@@ -61,6 +61,7 @@ module MegaDrive
           break
         end
       end
+      @vdp.end_vblank!
       @vdp.render_frame
       @frame_count += 1
       @render_version += 1

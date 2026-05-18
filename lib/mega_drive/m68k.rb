@@ -493,12 +493,12 @@ module MegaDrive
         left = read_address_register(reg)
         right = read_ea(mode, ea_reg, size)
         right = sign_extend(right, 16) if size == SIZE_WORD
-        set_add_sub_flags(left, right, left - right, SIZE_LONG, subtract: true)
+        set_add_sub_flags(left, right, left - right, SIZE_LONG, subtract: true, affect_x: false)
       elsif opmode < 0x03
         size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode]
         left = @d[reg]
         right = read_ea(mode, ea_reg, size)
-        set_add_sub_flags(left, right, left - right, size, subtract: true)
+        set_add_sub_flags(left, right, left - right, size, subtract: true, affect_x: false)
       else
         size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
         left, result = mutate_ea(mode, ea_reg, size) { |value| value ^ @d[reg] }
@@ -524,7 +524,7 @@ module MegaDrive
       if operation == 0x0C00
         left = read_ea(mode, reg, size)
         result = left - immediate
-        set_add_sub_flags(left, immediate, result, size, subtract: true)
+        set_add_sub_flags(left, immediate, result, size, subtract: true, affect_x: false)
       else
         left, result = mutate_ea(mode, reg, size) do |value|
           case operation
@@ -578,7 +578,7 @@ module MegaDrive
         old = read_ea(mode, reg, ea_size)
         address = nil
       else
-        address = effective_address(mode, reg, ea_size)
+        address = writable_memory_ea_address(mode, reg, ea_size)
         old = read_sized(address, ea_size)
       end
       result = subtract ? old - value : old + value
@@ -1022,7 +1022,8 @@ module MegaDrive
       @ccr |= FLAG_N if negative?(value, size)
     end
 
-    def set_add_sub_flags(left, right, result, size, subtract:)
+    def set_add_sub_flags(left, right, result, size, subtract:, affect_x: true)
+      x = @ccr & FLAG_X
       mask = mask_for(size)
       sign = sign_bit_for(size)
       left &= mask
@@ -1035,8 +1036,9 @@ module MegaDrive
         carry = left + right > mask
         overflow = (~(left ^ right) & (left ^ result) & sign) != 0
       end
-      @ccr = 0
-      @ccr |= FLAG_C | FLAG_X if carry
+      @ccr = affect_x ? 0 : x
+      @ccr |= FLAG_C if carry
+      @ccr |= FLAG_X if affect_x && carry
       @ccr |= FLAG_V if overflow
       @ccr |= FLAG_Z if result.zero?
       @ccr |= FLAG_N if (result & sign) != 0

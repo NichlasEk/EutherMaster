@@ -90,7 +90,7 @@ module MegaDrive
       case memory_target
       when :cram
         index = (@address >> 1) & (CRAM_SIZE - 1)
-        value &= 0x0FFF
+        value &= 0x0EEE
         @video_dirty = true if @cram[index] != value
         @cram[index] = value
         @palette_version = -1
@@ -152,9 +152,12 @@ module MegaDrive
       @irq_level = 6
     end
 
+    def end_vblank!
+      @status &= ~0x0080
+    end
+
     def acknowledge_interrupt(_level)
       @irq_level = 0
-      @status &= ~0x0080
     end
 
     def palette_rgba
@@ -179,9 +182,10 @@ module MegaDrive
     end
 
     def md_color_rgba(value)
-      r = ((value >> 1) & 0x07) * 36
-      g = ((value >> 5) & 0x07) * 36
-      b = ((value >> 9) & 0x07) * 36
+      levels = [0, 52, 87, 116, 144, 172, 206, 255]
+      r = levels[(value >> 1) & 0x07]
+      g = levels[(value >> 5) & 0x07]
+      b = levels[(value >> 9) & 0x07]
       [r, g, b, 255].pack('C4')
     end
 
@@ -276,7 +280,7 @@ module MegaDrive
         index = (address >> 1) & (CRAM_SIZE - 1)
         old = @cram[index] || 0
         value = address.even? ? ((byte << 8) | (old & 0x00FF)) : ((old & 0xFF00) | byte)
-        value &= 0x0FFF
+        value &= 0x0EEE
         @video_dirty = true if @cram[index] != value
         @cram[index] = value
         @palette_version = -1

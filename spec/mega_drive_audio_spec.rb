@@ -72,7 +72,7 @@ RSpec.describe 'Mega Drive audio' do
 
     expect(vdp.registers[15]).to eq(2)
     expect(vdp.cram[0]).to eq(0x0EEE)
-    expect(vdp.palette_rgba[0].bytes[0, 3]).to eq([252, 252, 252])
+    expect(vdp.palette_rgba[0].bytes[0, 3]).to eq([255, 255, 255])
   end
 
   it 'decodes full Mega Drive VDP data-port command targets' do
@@ -179,6 +179,19 @@ RSpec.describe 'Mega Drive audio' do
 
     expect(vdp.palette_rgba[0].bytes[0, 3]).to eq([0, 0, 0])
     expect(vdp.palette_rgba[17].bytes[0, 3]).to eq([0, 0, 0])
+  end
+
+  it 'keeps the VBlank status bit until VBlank ends' do
+    vdp = MegaDrive::VDP.new
+
+    vdp.request_vblank!
+    expect(vdp.read_control & 0x0080).to eq(0x0080)
+
+    vdp.acknowledge_interrupt(6)
+    expect(vdp.read_control & 0x0080).to eq(0x0080)
+
+    vdp.end_vblank!
+    expect(vdp.read_control & 0x0080).to eq(0)
   end
 
   it 'renders basic sprites from the sprite attribute table' do
