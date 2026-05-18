@@ -268,6 +268,60 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.a[1]).to eq(0x1234_5678)
   end
 
+  it 'pushes effective addresses with PEA' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4878, 0x1234,       # PEA ($1234).W
+      0x4879, 0x0000, 0x3456 # PEA ($3456).L
+    ])
+
+    cpu.step
+    expect(cpu.ssp).to eq(0x00FE_FFFC)
+    expect(bus.read_long(cpu.ssp)).to eq(0x0000_1234)
+
+    cpu.step
+    expect(cpu.ssp).to eq(0x00FE_FFF8)
+    expect(bus.read_long(cpu.ssp)).to eq(0x0000_3456)
+  end
+
+  it 'creates and removes stack frames with LINK and UNLK' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4E56, 0xFFF0, # LINK A6,#-16
+      0x4E5E          # UNLK A6
+    ])
+    cpu.instance_variable_get(:@a)[6] = 0x1234_5678
+
+    cpu.step
+    expect(cpu.a[6]).to eq(0x00FE_FFFC)
+    expect(cpu.ssp).to eq(0x00FE_FFEC)
+    expect(bus.read_long(0x00FE_FFFC)).to eq(0x1234_5678)
+
+    cpu.step
+    expect(cpu.a[6]).to eq(0x1234_5678)
+    expect(cpu.ssp).to eq(0x00FF_0000)
+  end
+
+  it 'sets byte destinations with Scc conditions' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x50F8, 0x2000, # ST ($2000).W
+      0x57F8, 0x2001, # SEQ ($2001).W
+      0x56C0          # SNE D0
+    ])
+
+    cpu.step
+    expect(bus.read_byte(0x2000)).to eq(0xFF)
+
+    cpu.sr = 0x2004
+    cpu.step
+    expect(bus.read_byte(0x2001)).to eq(0xFF)
+
+    cpu.sr = 0x2004
+    cpu.step
+    expect(cpu.d[0] & 0xFF).to eq(0x00)
+  end
+
   it 'executes register arithmetic and comparisons' do
     reset_to(0x100)
     load_program(0x100, [

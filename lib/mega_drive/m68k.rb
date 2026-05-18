@@ -121,6 +121,9 @@ module MegaDrive
         return neg(opcode) if (opcode & 0xFF00) == 0x4400
         return not_op(opcode) if (opcode & 0xFF00) == 0x4600 && ((opcode >> 6) & 0x03) != 0x03
         return swap(opcode) if (opcode & 0xFFF8) == 0x4840
+        return pea(opcode) if (opcode & 0xFFC0) == 0x4840
+        return link(opcode) if (opcode & 0xFFF8) == 0x4E50
+        return unlink(opcode) if (opcode & 0xFFF8) == 0x4E58
         return move_usp(opcode) if (opcode & 0xFFF0) == 0x4E60
         return immediate_operation(opcode) if immediate_operation?(opcode)
         return add_sub(opcode, subtract: false) if (opcode & 0xF000) == 0xD000
@@ -137,6 +140,7 @@ module MegaDrive
         return moveq(opcode) if (opcode & 0xF000) == 0x7000
         return branch(opcode) if (opcode & 0xF000) == 0x6000
         return dbcc(opcode) if (opcode & 0xF0F8) == 0x50C8
+        return scc(opcode) if (opcode & 0xF0C0) == 0x50C0
         return addq_subq(opcode) if (opcode & 0xF000) == 0x5000 && ((opcode >> 6) & 0x03) != 0x03
         return tst(opcode) if (opcode & 0xFF00) == 0x4A00
         return ext(opcode) if (opcode & 0xFFB8) == 0x4880
@@ -349,6 +353,31 @@ module MegaDrive
       @d[reg] = ((value << 16) | (value >> 16)) & 0xFFFF_FFFF
       set_nz_flags(@d[reg], SIZE_LONG, keep_x: true)
       finish(4)
+    end
+
+    def pea(opcode)
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      raise NotImplementedError, "M68K invalid PEA EA mode #{mode}/#{reg}" if mode < 2 || mode == 3 || mode == 4
+
+      push_long(effective_address(mode, reg, SIZE_LONG))
+      finish(12)
+    end
+
+    def link(opcode)
+      reg = opcode & 0x07
+      displacement = sign_extend(fetch_word, 16)
+      push_long(read_address_register(reg))
+      write_address_register(reg, sp)
+      set_sp(sp + displacement)
+      finish(16)
+    end
+
+    def unlink(opcode)
+      reg = opcode & 0x07
+      set_sp(read_address_register(reg))
+      write_address_register(reg, pop_long)
+      finish(12)
     end
 
     def move_usp(opcode)
@@ -683,6 +712,22 @@ module MegaDrive
         finish(10)
       else
         finish(14)
+      end
+    end
+
+    def scc(opcode)
+      condition = (opcode >> 8) & 0x0F
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      value = condition_true?(condition) ? 0xFF : 0x00
+      if mode == 0
+        write_data_register(reg, SIZE_BYTE, value)
+        finish(value == 0xFF ? 6 : 4)
+      elsif mode == 1
+        raise NotImplementedError, "M68K invalid Scc EA mode #{mode}/#{reg}"
+      else
+        write_sized(writable_memory_ea_address(mode, reg, SIZE_BYTE), SIZE_BYTE, value)
+        finish(8)
       end
     end
 
