@@ -5,8 +5,8 @@ module MegaDrive
     LEFT = 0x04
     RIGHT = 0x08
     BUTTON_A = 0x10
-    BUTTON_B = 0x10
-    BUTTON_C = 0x20
+    BUTTON_B = 0x20
+    BUTTON_C = 0x40
     START = 0x80
 
     attr_accessor :port_a, :port_b

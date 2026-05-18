@@ -42,6 +42,7 @@ module AstralVerse
         { id: :right, label: 'Right', gesture: MysticTouch::GESTURE_EAST, default: SDL3::K_RIGHT, pad_default: SDL3::GAMEPAD_BUTTON_DPAD_RIGHT },
         { id: :button_1, label: 'Button 1', gesture: MysticTouch::GESTURE_PRIMUS, default: SDL3::K_Z, pad_default: SDL3::GAMEPAD_BUTTON_SOUTH },
         { id: :button_2, label: 'Button 2', gesture: MysticTouch::GESTURE_SECUNDUS, default: SDL3::K_X, pad_default: SDL3::GAMEPAD_BUTTON_EAST },
+        { id: :button_3, label: 'Button 3', gesture: MysticTouch::GESTURE_TERTIUS, default: SDL3::K_C, pad_default: SDL3::GAMEPAD_BUTTON_WEST },
         { id: :pause, label: 'Pause', gesture: MysticTouch::GESTURE_START, special: :pause, default: SDL3::K_P, pad_default: SDL3::GAMEPAD_BUTTON_START },
         { id: :reset, label: 'Reset', special: :reset, default: SDL3::K_R, pad_default: SDL3::GAMEPAD_BUTTON_BACK }
       ].freeze

@@ -218,14 +218,20 @@ RSpec.describe 'Mega Drive audio' do
   it 'routes the first controller through the Genesis I/O ports' do
     controller = MegaDrive::Controller.new
     bus = MegaDrive::M68KBus.new(controller: controller)
-    controller.port_a = 0xFF & ~MegaDrive::Controller::START & ~MegaDrive::Controller::BUTTON_B
+    controller.port_a = 0xFF &
+      ~MegaDrive::Controller::START &
+      ~MegaDrive::Controller::BUTTON_A &
+      ~MegaDrive::Controller::BUTTON_B &
+      ~MegaDrive::Controller::BUTTON_C
 
     bus.write_byte(0xA10009, 0x40)
     bus.write_byte(0xA10003, 0x40)
     expect(bus.read_byte(0xA10002) & 0x10).to eq(0)
+    expect(bus.read_byte(0xA10002) & 0x20).to eq(0)
     expect(bus.read_byte(0xA10003) & 0x10).to eq(0)
 
     bus.write_byte(0xA10003, 0x00)
+    expect(bus.read_byte(0xA10002) & 0x10).to eq(0)
     expect(bus.read_byte(0xA10002) & 0x20).to eq(0)
     expect(bus.read_byte(0xA10003) & 0x20).to eq(0)
     expect(bus.read_word(0xA10002) & 0x20).to eq(0)
