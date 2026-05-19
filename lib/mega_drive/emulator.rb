@@ -76,55 +76,63 @@ module MegaDrive
       cycles = 0
       steps = 0
       z80_pending = @z80_pending || 0
+      z80_clock = 0.0
       vblank_requested = false
       next_line = 1
+      lines_per_frame = LINES_PER_FRAME
+      cycles_per_frame = CYCLES_PER_FRAME
+      audio_cycles_per_frame = AUDIO_CYCLES_PER_FRAME
       @audio.begin_frame
       @bus.begin_frame
-      while cycles < CYCLES_PER_FRAME
+      while cycles < cycles_per_frame
         begin
-          current_line = [cycles / LINE_M68K_CYCLES, LINES_PER_FRAME - 1].min
+          current_line = [cycles / LINE_M68K_CYCLES, lines_per_frame - 1].min
           @bus.frame_cycle = current_line * LINE_Z80_CYCLES
           @bus.ym_frame_cycle = cycles
           step_cycles = @cpu.step
           cycles += step_cycles
-          @ym2612.sync_to_cycle(cycles)
+          z80_clock = cycles * M68KBus::M68K_TO_Z80_CYCLE_RATIO
+          z80_pending += step_cycles * M68KBus::M68K_TO_Z80_CYCLE_RATIO
+          @bus.frame_cycle = z80_clock
+          @bus.ym_frame_cycle = cycles
+          z80_pending = drain_z80_pending(z80_pending)
           steps += 1
         rescue NotImplementedError
           break
         end
 
-        while next_line <= LINES_PER_FRAME && cycles >= next_line * LINE_M68K_CYCLES
+        while next_line <= lines_per_frame && cycles >= next_line * LINE_M68K_CYCLES
+          line_m68k_cycle = next_line * LINE_M68K_CYCLES
           if !vblank_requested && next_line >= VBLANK_LINE
             @bus.frame_cycle = next_line * LINE_Z80_CYCLES
-            @bus.ym_frame_cycle = cycles
+            @bus.ym_frame_cycle = line_m68k_cycle
             @vdp.request_vblank!
             vblank_requested = true
           end
 
-          z80_pending = [z80_pending + LINE_Z80_CYCLES, MAX_Z80_PENDING_CYCLES].min
           @bus.frame_cycle = next_line * LINE_Z80_CYCLES
-          @bus.ym_frame_cycle = cycles
-          z80_pending = drain_z80_pending(z80_pending)
+          @bus.ym_frame_cycle = line_m68k_cycle
           next_line += 1
         end
       end
 
-      while next_line <= LINES_PER_FRAME
+      while next_line <= lines_per_frame
+        line_m68k_cycle = next_line * LINE_M68K_CYCLES
         if !vblank_requested && next_line >= VBLANK_LINE
           @bus.frame_cycle = next_line * LINE_Z80_CYCLES
-          @bus.ym_frame_cycle = cycles
+          @bus.ym_frame_cycle = line_m68k_cycle
           @vdp.request_vblank!
           vblank_requested = true
         end
-        z80_pending = [z80_pending + LINE_Z80_CYCLES, MAX_Z80_PENDING_CYCLES].min
         @bus.frame_cycle = next_line * LINE_Z80_CYCLES
-        @bus.ym_frame_cycle = cycles
-        z80_pending = drain_z80_pending(z80_pending)
+        @bus.ym_frame_cycle = line_m68k_cycle
         next_line += 1
       end
-      @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
-      @bus.ym_frame_cycle = CYCLES_PER_FRAME
+      @bus.frame_cycle = audio_cycles_per_frame
+      @bus.ym_frame_cycle = cycles_per_frame
       @vdp.request_vblank! unless vblank_requested
+      remaining_z80 = audio_cycles_per_frame - z80_clock
+      z80_pending += remaining_z80 if remaining_z80.positive?
       if z80_pending.positive?
         z80_pending = drain_z80_pending(z80_pending, allow_partial: true)
       end
@@ -147,14 +155,30 @@ module MegaDrive
     def psg = @audio
     def request_pause; end
 
+    def frame_rate
+      60.0
+    end
+
+    def frame_cycles
+      AUDIO_CYCLES_PER_FRAME
+    end
+
     def drain_z80_pending(pending, allow_partial: false)
+      return 0 unless @bus.z80_running?
+
+      target_frame_cycle = @bus.frame_cycle.to_i
+      target_ym_cycle = @bus.ym_frame_cycle.to_f
       while pending >= Z80_BATCH_CYCLES || (allow_partial && pending.positive?)
         cycles = pending >= Z80_BATCH_CYCLES ? Z80_BATCH_CYCLES : pending
+        @bus.frame_cycle = target_frame_cycle - pending
+        @bus.ym_frame_cycle = target_ym_cycle - (pending * M68KBus::Z80_TO_M68K_CYCLE_RATIO)
         ran = @bus.run_z80_cycles(cycles)
         break unless ran.positive?
 
-        pending = [pending - ran, 0].max
+        pending -= ran
       end
+      @bus.frame_cycle = target_frame_cycle
+      @bus.ym_frame_cycle = target_ym_cycle
       pending
     end
 
@@ -218,6 +242,10 @@ module MegaDrive
 
     def apply_region_configuration
       @bus.version_register = md_version_register if @bus
+      if @audio
+        @audio.frame_cycles = frame_cycles
+        @audio.ym_frame_cycles = CYCLES_PER_FRAME
+      end
     end
 
     def md_version_register
@@ -225,11 +253,7 @@ module MegaDrive
                  when :jp then false
                  else true
                  end
-      pal = case @timing_mode
-            when :pal then true
-            when :ntsc then false
-            else @region_mode == :eu
-            end
+      pal = @timing_mode == :pal
       0x80 | (pal ? 0x40 : 0) | (overseas ? 0x20 : 0)
     end
 

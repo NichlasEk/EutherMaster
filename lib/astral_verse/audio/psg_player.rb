@@ -104,7 +104,7 @@ module AstralVerse
 
       prebuffer_pipe(count) unless @pipe_prebuffered
       drop_stale_audio_jobs
-      @audio_jobs << [@psg.capture_frame_job(count, FRAME_CYCLES, SAMPLE_RATE), @volume.to_f.clamp(0.0, 1.0)]
+      @audio_jobs << [@psg.capture_frame_job(count, audio_frame_cycles, SAMPLE_RATE), @volume.to_f.clamp(0.0, 1.0)]
     rescue IOError, Errno::EPIPE
       @sink&.close
       @sink = nil
@@ -161,7 +161,7 @@ module AstralVerse
       return if count <= 0
 
       prebuffer_pipe(count) unless @pipe_prebuffered
-      samples = dc_block!(@psg.render_frame_samples(count, FRAME_CYCLES, SAMPLE_RATE))
+      samples = dc_block!(@psg.render_frame_samples(count, audio_frame_cycles, SAMPLE_RATE))
       @sink_mutex.synchronize { @sink.write_samples(samples, STREAM_GAIN * @volume.to_f.clamp(0.0, 1.0)) }
     rescue IOError, Errno::EPIPE
       @sink&.close
@@ -170,11 +170,15 @@ module AstralVerse
     end
 
     def samples_for_frame
-      frame_samples = SAMPLE_RATE * FRAME_CYCLES / @psg.class::CLOCK
+      frame_samples = SAMPLE_RATE * audio_frame_cycles / @psg.class::CLOCK
       @sample_credit += frame_samples * AUDIO_OVERSUPPLY
       count = @sample_credit.floor
       @sample_credit -= count
       count
+    end
+
+    def audio_frame_cycles
+      @psg.respond_to?(:frame_cycles) ? @psg.frame_cycles : FRAME_CYCLES
     end
 
     def prebuffer_pipe(sample_count)

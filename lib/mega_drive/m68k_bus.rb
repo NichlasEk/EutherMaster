@@ -21,6 +21,8 @@ module MegaDrive
     VDP_HV_COUNTER = 0x00C0_0008
     WORK_RAM_BASE = 0x00E0_0000
     WORK_RAM_MASK = 0x0000_FFFF
+    Z80_TO_M68K_CYCLE_RATIO = 488.0 / 228.0
+    M68K_TO_Z80_CYCLE_RATIO = 228.0 / 488.0
 
     attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
 
@@ -165,9 +167,21 @@ module MegaDrive
     def run_z80_cycles(cycles)
       return 0 unless z80_running?
 
-      @z80_bus.frame_cycle = @frame_cycle
-      @z80_bus.ym_frame_cycle = @ym_frame_cycle
-      @z80_cpu.run_cycles(cycles.to_i)
+      budget = cycles.to_i
+      ran = 0
+      start_frame_cycle = @frame_cycle.to_i
+      start_ym_cycle = @ym_frame_cycle.to_f
+      while ran < budget
+        @z80_bus.frame_cycle = start_frame_cycle + ran
+        @z80_bus.ym_frame_cycle = start_ym_cycle + (ran * Z80_TO_M68K_CYCLE_RATIO)
+        step_cycles = @z80_cpu.step
+        break unless step_cycles.positive?
+
+        ran += step_cycles
+      end
+      @z80_bus.frame_cycle = start_frame_cycle + ran
+      @z80_bus.ym_frame_cycle = start_ym_cycle + (ran * Z80_TO_M68K_CYCLE_RATIO)
+      ran
     rescue NotImplementedError
       0
     end

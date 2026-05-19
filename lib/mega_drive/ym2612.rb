@@ -11,6 +11,9 @@ module MegaDrive
     MODULATION_DEPTH = 8.0
     WRITE_BUSY_CYCLES = 1_344
     TIMER_TICK_CYCLES = 72
+    FNUM_HZ_SCALE = 0.0529819
+    DAC_GAIN = 0.85
+    DAC_SMOOTHING = 0.38
 
     VOLUME_TABLE = Array.new(128) { |tl| 10.0**(-(tl * 0.75) / 20.0) }.freeze
     SINE_TABLE = Array.new(SINE_SIZE) { |i| Math.sin(i * TWO_PI / SINE_SIZE) }.freeze
@@ -74,6 +77,7 @@ module MegaDrive
       @operator_last_output = Array.new(CHANNELS * OPERATORS, 0.0)
       @dac_enabled = false
       @dac_sample = 0.0
+      @dac_output = 0.0
       @writes = 0
       @write_log = []
       @last_sync_cycle = 0
@@ -174,12 +178,14 @@ module MegaDrive
       rendered_envelope_stage = @envelope_stage
       rendered_operator_output = @operator_output
       rendered_operator_last_output = @operator_last_output
+      rendered_dac_output = @dac_output
       restore_render_references(live_state)
       @phase = rendered_phase
       @envelope = rendered_envelope
       @envelope_stage = rendered_envelope_stage
       @operator_output = rendered_operator_output
       @operator_last_output = rendered_operator_last_output
+      @dac_output = rendered_dac_output
       samples
     end
 
@@ -209,12 +215,14 @@ module MegaDrive
       rendered_envelope_stage = @envelope_stage
       rendered_operator_output = @operator_output
       rendered_operator_last_output = @operator_last_output
+      rendered_dac_output = @dac_output
       restore_render_references(live_state)
       @phase = rendered_phase
       @envelope = rendered_envelope
       @envelope_stage = rendered_envelope_stage
       @operator_output = rendered_operator_output
       @operator_last_output = rendered_operator_last_output
+      @dac_output = rendered_dac_output
       samples
     end
 
@@ -440,7 +448,6 @@ module MegaDrive
       pan_l = @pan_l
       pan_r = @pan_r
       dac_enabled = @dac_enabled
-      dac_sample = @dac_sample
 
       channel = 0
       while channel < CHANNELS
@@ -451,7 +458,7 @@ module MegaDrive
         end
 
         sample = channel_sample(channel, sample_rate)
-        sample = dac_sample if channel == 5 && dac_enabled
+        sample = render_dac_sample if channel == 5 && dac_enabled
         left += sample if pan_l[channel]
         right += sample if pan_r[channel]
         channel += 1
@@ -470,7 +477,6 @@ module MegaDrive
       pan_l = @pan_l
       pan_r = @pan_r
       dac_enabled = @dac_enabled
-      dac_sample = @dac_sample
       envelope = @envelope
       envelope_stage = @envelope_stage
 
@@ -488,7 +494,7 @@ module MegaDrive
           next
         end
 
-        sample = (channel == 5 && dac_enabled) ? dac_sample : channel_sample_fast(channel, sample_step)
+        sample = (channel == 5 && dac_enabled) ? render_dac_sample : channel_sample_fast(channel, sample_step)
         if pan_l[channel] && pan_r[channel]
           mixed += sample
         elsif pan_l[channel] || pan_r[channel]
@@ -565,12 +571,18 @@ module MegaDrive
       sample.clamp(-1.0, 1.0)
     end
 
+    def render_dac_sample
+      @dac_output ||= 0.0
+      target = @dac_sample * DAC_GAIN
+      @dac_output += (target - @dac_output) * DAC_SMOOTHING
+      @dac_output.clamp(-1.0, 1.0)
+    end
+
     def channel_frequency(channel)
       fnum = @fnum[channel]
       return 0.0 if fnum.zero?
 
-      # Approximate OPN2 pitch conversion. Good enough for early audible state.
-      440.0 * (fnum / 0x26A.to_f) * (2.0**(@block[channel] - 4))
+      fnum * (2.0**(@block[channel] - 1)) * FNUM_HZ_SCALE
     end
 
     def operator_frequency(channel, op, fallback)
@@ -580,7 +592,7 @@ module MegaDrive
       fnum = @operator_fnum[idx]
       return fallback if fnum.zero?
 
-      440.0 * (fnum / 0x26A.to_f) * (2.0**(@operator_block[idx] - 4))
+      fnum * (2.0**(@operator_block[idx] - 1)) * FNUM_HZ_SCALE
     end
 
     def operator_sample(idx, base, sample_step, modulation = 0.0)
@@ -683,6 +695,7 @@ module MegaDrive
         operator_last_output: @operator_last_output.dup,
         dac_enabled: @dac_enabled,
         dac_sample: @dac_sample,
+        dac_output: @dac_output,
         timer_a_counter: @timer_a_counter,
         timer_b_counter: @timer_b_counter,
         timer_control: @timer_control,
@@ -724,6 +737,7 @@ module MegaDrive
         operator_last_output: @operator_last_output,
         dac_enabled: @dac_enabled,
         dac_sample: @dac_sample,
+        dac_output: @dac_output,
         timer_a_counter: @timer_a_counter,
         timer_b_counter: @timer_b_counter,
         timer_control: @timer_control,
@@ -743,7 +757,8 @@ module MegaDrive
         envelope: @envelope.dup,
         envelope_stage: @envelope_stage.dup,
         operator_output: @operator_output.dup,
-        operator_last_output: @operator_last_output.dup
+        operator_last_output: @operator_last_output.dup,
+        dac_output: @dac_output
       }
     end
 
@@ -753,6 +768,7 @@ module MegaDrive
       @envelope_stage = state[:envelope_stage].dup
       @operator_output = state[:operator_output].dup
       @operator_last_output = state[:operator_last_output].dup
+      @dac_output = state[:dac_output] || @dac_output || 0.0
     end
 
     def restore_render_state(state)
@@ -782,6 +798,7 @@ module MegaDrive
       @operator_last_output = state[:operator_last_output]&.dup || Array.new(CHANNELS * OPERATORS, 0.0)
       @dac_enabled = state[:dac_enabled]
       @dac_sample = state[:dac_sample]
+      @dac_output = state[:dac_output] || 0.0
       @timer_a_counter = state[:timer_a_counter] || 0
       @timer_b_counter = state[:timer_b_counter] || 0
       @timer_control = state[:timer_control] || 0
@@ -820,6 +837,7 @@ module MegaDrive
       @operator_last_output = state[:operator_last_output]
       @dac_enabled = state[:dac_enabled]
       @dac_sample = state[:dac_sample]
+      @dac_output = state[:dac_output]
       @timer_a_counter = state[:timer_a_counter]
       @timer_b_counter = state[:timer_b_counter]
       @timer_control = state[:timer_control]

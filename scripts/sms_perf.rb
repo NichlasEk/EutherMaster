@@ -57,11 +57,12 @@ audio_credit = 0.0
 frames.times do
   stone.gaze_frame
   if audio_render
-    audio_credit += AstralVerse::PsgPlayer::SAMPLE_RATE * AstralVerse::PsgPlayer::FRAME_CYCLES / stone.emulator.psg.class::CLOCK
+    audio_frame_cycles = stone.emulator.psg.respond_to?(:frame_cycles) ? stone.emulator.psg.frame_cycles : AstralVerse::PsgPlayer::FRAME_CYCLES
+    audio_credit += AstralVerse::PsgPlayer::SAMPLE_RATE * audio_frame_cycles / stone.emulator.psg.class::CLOCK
     sample_count = audio_credit.floor
     audio_credit -= sample_count
     audio_started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
-    stone.emulator.psg.render_frame_samples(sample_count, AstralVerse::PsgPlayer::FRAME_CYCLES, AstralVerse::PsgPlayer::SAMPLE_RATE)
+    stone.emulator.psg.render_frame_samples(sample_count, audio_frame_cycles, AstralVerse::PsgPlayer::SAMPLE_RATE)
     audio_seconds += Process.clock_gettime(Process::CLOCK_MONOTONIC) - audio_started
     audio_samples += sample_count
   end

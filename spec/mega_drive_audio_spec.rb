@@ -45,6 +45,29 @@ RSpec.describe 'Mega Drive audio' do
     expect(samples.flatten.any? { |sample| sample.abs > 0.001 }).to be(true)
   end
 
+  it 'converts YM2612 fnum/block to Mega Drive pitch scale' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0xA0)
+    ym2612.write_data(0x6A)
+    ym2612.write_address_1(0xA4)
+    ym2612.write_data((4 << 3) | 0x02)
+
+    expect(ym2612.send(:channel_frequency, 0)).to be_within(0.5).of(261.95)
+  end
+
+  it 'replays YM2612 DAC sample writes at their frame cycles' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_register(0, 0x2B, 0x80)
+    ym2612.begin_frame
+    ym2612.write_register(0, 0x2A, 0x00, cycle: 0)
+    ym2612.write_register(0, 0x2A, 0xFF, cycle: 80)
+
+    samples = ym2612.render_frame_mono_samples(32, 160)
+
+    expect(samples[6]).to be < -0.03
+    expect(samples[24]).to be > 0.03
+  end
+
   it 'releases YM2612 operators after key-off instead of leaving notes stuck' do
     ym2612 = MegaDrive::YM2612.new
     ym2612.write_address_1(0x4C)
@@ -323,6 +346,29 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.ym2612.registers[0][0xA0]).to eq(0x34)
   end
 
+  it 'timestamps Z80 audio writes across elapsed Z80 cycles inside a run batch' do
+    emulator = MegaDrive::Emulator.new
+    program = [
+      0x3E, 0x9F,       # LD A,$9F
+      0x32, 0x11, 0x7F, # LD ($7F11),A
+      0x00,             # NOP
+      0x00,             # NOP
+      0x3E, 0x90,       # LD A,$90
+      0x32, 0x11, 0x7F, # LD ($7F11),A
+      0x76              # HALT
+    ]
+    program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
+    emulator.bus.write_byte(0xA11200, 0x01)
+    emulator.bus.frame_cycle = 1_000
+    emulator.bus.ym_frame_cycle = 2_000
+
+    emulator.bus.run_z80_cycles(80)
+
+    cycles = emulator.instance_variable_get(:@sms_psg).write_log.last(2).map { |write| write[:cycle] }
+    expect(cycles.first).to be > 1_000
+    expect(cycles.last).to be > cycles.first
+  end
+
   it 'halts Z80 execution while the 68k owns the Z80 bus' do
     emulator = MegaDrive::Emulator.new
     emulator.bus.write_byte(0xA00000, 0x00) # NOP
@@ -335,8 +381,23 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.z80_cpu.pc).to eq(0)
   end
 
-  it 'preserves queued Z80 budget while the 68k owns the Z80 bus' do
+  it 'carries Z80 instruction overrun as timing debt' do
     emulator = MegaDrive::Emulator.new
+    emulator.bus.write_byte(0xA00000, 0x00) # NOP, 4 cycles
+    emulator.bus.write_byte(0xA11200, 0x01)
+
+    pending = emulator.send(:drain_z80_pending, 2, allow_partial: true)
+
+    expect(pending).to eq(-2)
+  end
+
+  it 'does not replay queued Z80 audio time after the 68k releases the bus' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    rom[0x100] = 0x60 # BRA.s
+    rom[0x101] = 0xFE
+    emulator.load_rom_data(rom)
     emulator.bus.write_byte(0xA00000, 0x00) # NOP
     emulator.bus.write_byte(0xA00001, 0x00) # NOP
     emulator.bus.write_byte(0xA11200, 0x01)
@@ -345,7 +406,7 @@ RSpec.describe 'Mega Drive audio' do
 
     emulator.run_frame
 
-    expect(emulator.instance_variable_get(:@z80_pending)).to be >= 64
+    expect(emulator.instance_variable_get(:@z80_pending)).to eq(0)
     expect(emulator.z80_cpu.pc).to eq(0)
   end
 

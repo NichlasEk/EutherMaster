@@ -7,9 +7,13 @@ module MegaDrive
     YM_FRAME_CYCLES = 127_800.0
     YM_RENDER_RATE = ENV.fetch('ASTRAL_MD_YM_RATE', '22050').to_i.clamp(11_025, SAMPLE_RATE)
 
+    attr_accessor :frame_cycles, :ym_frame_cycles
+
     def initialize(psg, ym2612)
       @psg = psg
       @ym2612 = ym2612
+      @frame_cycles = MegaDrive::PSG::CLOCK / 60.0
+      @ym_frame_cycles = YM_FRAME_CYCLES
     end
 
     def begin_frame
@@ -57,18 +61,18 @@ module MegaDrive
 
     def render_ym_samples(count, sample_rate)
       ym_rate = [YM_RENDER_RATE, sample_rate].min
-      return @ym2612.render_frame_mono_samples(count, YM_FRAME_CYCLES, sample_rate) if ym_rate == sample_rate
+      return @ym2612.render_frame_mono_samples(count, @ym_frame_cycles, sample_rate) if ym_rate == sample_rate
 
       ym_count = [(count * ym_rate / sample_rate.to_f).ceil, 1].max
-      upsample(@ym2612.render_frame_mono_samples(ym_count, YM_FRAME_CYCLES, ym_rate), count)
+      upsample(@ym2612.render_frame_mono_samples(ym_count, @ym_frame_cycles, ym_rate), count)
     end
 
     def render_ym_job_samples(job, count, sample_rate)
       ym_rate = [YM_RENDER_RATE, sample_rate].min
-      return @ym2612.render_frame_mono_job(job, count, YM_FRAME_CYCLES, sample_rate) if ym_rate == sample_rate
+      return @ym2612.render_frame_mono_job(job, count, @ym_frame_cycles, sample_rate) if ym_rate == sample_rate
 
       ym_count = [(count * ym_rate / sample_rate.to_f).ceil, 1].max
-      upsample(@ym2612.render_frame_mono_job(job, ym_count, YM_FRAME_CYCLES, ym_rate), count)
+      upsample(@ym2612.render_frame_mono_job(job, ym_count, @ym_frame_cycles, ym_rate), count)
     end
 
     def upsample(samples, count)
@@ -88,6 +92,10 @@ module MegaDrive
         index += 1
       end
       output
+    end
+
+    def clock
+      CLOCK
     end
   end
 end

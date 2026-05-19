@@ -101,6 +101,9 @@ module AstralVerse
         @binding_capture = nil
         @frame_count = 0
         @last_vision = now_ms
+        @run_fps = 0.0
+        @run_fps_frames = 0
+        @run_fps_started = @last_vision
         @next_draw = 0.0
         @status_label_cache = nil
         @status_label_until = 0.0
@@ -203,10 +206,13 @@ module AstralVerse
         poll_events
         update_game if @mode == :game
         now = now_ms
+        frame_ms = current_frame_ms
         if now >= @next_draw
           draw
-          @next_draw = now + FRAME_MS
+          @next_draw += frame_ms
+          @next_draw = now + frame_ms if @next_draw <= now - frame_ms
         end
+        now = now_ms
         sleep_ms = [[@next_draw - now, 1.0].min, 0.0].max
         SDL3.delay(sleep_ms.ceil)
       end
@@ -459,26 +465,43 @@ module AstralVerse
         end
 
         delta = now - @last_vision
-        return unless delta >= FRAME_MS && @running
+        frame_ms = current_frame_ms
+        return unless delta >= frame_ms && @running
 
         if @stone.instance_variable_get(:@codex_present)
-          frames = 0
-          while now - @last_vision >= FRAME_MS && frames < MAX_CATCHUP_FRAMES
-            sync_game_input_state
-            @stone.gaze_frame
-            @audio_player&.update
-            @frame_count += 1
-            @last_vision += FRAME_MS
-            frames += 1
-          end
-          if frames == MAX_CATCHUP_FRAMES && now - @last_vision >= FRAME_MS
-            dropped_frames = ((now - @last_vision) / FRAME_MS).floor
-            @audio_player&.cushion(dropped_frames)
-            @last_vision = now
-          end
+          sync_game_input_state
+          @stone.gaze_frame
+          @audio_player&.update
+          @frame_count += 1
+          record_run_frame(now)
+          @last_vision = now
         else
           @running = false
         end
+      end
+
+      def record_run_frame(now)
+        @run_fps_frames += 1
+        elapsed = now - @run_fps_started
+        return if elapsed < 500
+
+        @run_fps = @run_fps_frames * 1000.0 / elapsed
+        @run_fps_frames = 0
+        @run_fps_started = now
+        @status_label_cache = nil
+      end
+
+      def reset_run_fps(now = now_ms)
+        @run_fps = 0.0
+        @run_fps_frames = 0
+        @run_fps_started = now
+        @status_label_cache = nil
+      end
+
+      def current_frame_ms
+        emulator = @stone.emulator
+        rate = emulator.respond_to?(:frame_rate) ? emulator.frame_rate.to_f : 60.0
+        1000.0 / (rate.positive? ? rate : 60.0)
       end
 
       def draw
@@ -798,6 +821,7 @@ module AstralVerse
         @audio_player = build_audio_player
         @frame_count = 0
         @last_vision = now_ms
+        reset_run_fps(@last_vision)
         @running = autostart || was_running
         flash_status("Armed #{system_label} #{File.basename(path)}")
       rescue => e
@@ -833,6 +857,7 @@ module AstralVerse
         @audio_player = build_audio_player
         @frame_count = @stone.emulator.frame_count
         @last_vision = now_ms
+        reset_run_fps(@last_vision)
         @running = was_running
         flash_status("Loaded #{File.basename(path)}")
       rescue => e
@@ -960,6 +985,7 @@ module AstralVerse
         @stone.attune
         @audio_player&.stop
         @frame_count = 0
+        reset_run_fps
       end
 
       def open_existing_gamepads
@@ -1386,7 +1412,9 @@ module AstralVerse
 
       def perf_label
         perf = @stone.emulator.perf_summary
-        'emu %.1f fps cpu %.1fms vdp %.1fms' % [perf[:fps], perf[:avg_cpu_ms], perf[:avg_vdp_ms]]
+        cap = 1000.0 / current_frame_ms
+        'run %.1f/%.0f fps head %.1f fps cpu %.1fms vdp %.1fms' %
+          [@run_fps.to_f, cap, perf[:fps], perf[:avg_cpu_ms], perf[:avg_vdp_ms]]
       end
 
       def rom_file?(filename)
