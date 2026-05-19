@@ -50,6 +50,26 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.flag_z?).to be true
   end
 
+  it 'executes CMPM.B with postincrement and preserves X' do
+    reset_to(0x100)
+    load_program(0x100, [0xB50B]) # CMPM.B (A3)+,(A2)+
+    cpu.instance_variable_get(:@a)[2] = 0x00FF_FB00
+    cpu.instance_variable_get(:@a)[3] = 0x00FF_FB80
+    cpu.sr = cpu.sr | MegaDrive::M68K::FLAG_X
+    bus.write_byte(0x00FF_FB00, 0x12)
+    bus.write_byte(0x00FF_FB80, 0x10)
+
+    cpu.step
+
+    expect(cpu.a[2]).to eq(0x00FF_FB01)
+    expect(cpu.a[3]).to eq(0x00FF_FB81)
+    expect(bus.read_byte(0x00FF_FB00)).to eq(0x12)
+    expect(cpu.flag_x?).to be true
+    expect(cpu.flag_c?).to be false
+    expect(cpu.flag_z?).to be false
+    expect(cpu.flag_n?).to be false
+  end
+
   it 'executes immediate MOVE to data and address registers' do
     reset_to(0x100)
     load_program(0x100, [

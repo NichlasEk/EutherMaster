@@ -454,6 +454,23 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_word(0xC00000)).to eq(0x0EEE)
   end
 
+  it 'preserves hidden Mega Drive CRAM low bits for read-modify-write palette code' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+
+    bus.write_word(0xC00004, 0xC000) # CRAM write address 0
+    bus.write_word(0xC00004, 0x0000)
+    bus.write_word(0xC00000, 0x0F51)
+    vdp.render_frame
+
+    bus.write_word(0xC00004, 0x0000) # CRAM read address 0
+    bus.write_word(0xC00004, 0x0020)
+
+    expect(vdp.cram[0]).to eq(0x0F51)
+    expect(bus.read_word(0xC00000)).to eq(0x0F51)
+    expect(vdp.palette_rgba[0].bytes[0, 3]).to eq([0, 87, 255])
+  end
+
   it 'binds the UI-visible framebuffer to the Mega Drive VDP' do
     emulator = MegaDrive::Emulator.new
 

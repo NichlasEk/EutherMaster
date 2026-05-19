@@ -116,7 +116,7 @@ module MegaDrive
       case memory_target
       when :cram
         index = (@address >> 1) & (CRAM_SIZE - 1)
-        value &= 0x0EEE
+        value &= 0x0FFF
         @video_dirty = true if @cram[index] != value
         @cram[index] = value
         @palette_version = -1
@@ -337,7 +337,7 @@ module MegaDrive
         index = (address >> 1) & (CRAM_SIZE - 1)
         old = @cram[index] || 0
         value = address.even? ? ((byte << 8) | (old & 0x00FF)) : ((old & 0xFF00) | byte)
-        value &= 0x0EEE
+        value &= 0x0FFF
         @video_dirty = true if @cram[index] != value
         @cram[index] = value
         @palette_version = -1

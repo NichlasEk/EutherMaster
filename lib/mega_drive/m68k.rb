@@ -610,6 +610,17 @@ module MegaDrive
         left = @d[reg]
         right = read_ea(mode, ea_reg, size)
         set_add_sub_flags(left, right, left - right, size, subtract: true, affect_x: false)
+      elsif mode == 0x01
+        size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
+        step = increment_step(size, ea_reg)
+        source_address = read_address_register(ea_reg)
+        dest_address = read_address_register(reg)
+        right = read_sized(source_address, size)
+        left = read_sized(dest_address, size)
+        write_address_register(ea_reg, source_address + step)
+        write_address_register(reg, dest_address + increment_step(size, reg))
+        set_add_sub_flags(left, right, left - right, size, subtract: true, affect_x: false)
+        return finish(size == SIZE_LONG ? 20 : 12)
       else
         size = [SIZE_BYTE, SIZE_WORD, SIZE_LONG][opmode & 0x03]
         left, result = mutate_ea(mode, ea_reg, size) { |value| value ^ @d[reg] }
