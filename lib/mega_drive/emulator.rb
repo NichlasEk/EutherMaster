@@ -6,7 +6,8 @@ module MegaDrive
     M68K_CLOCK = 7_670_454
     Z80_CLOCK = 3_579_545
     AUDIO_CYCLES_PER_FRAME = 59_736
-    Z80_BATCH_CYCLES = 128
+    Z80_BATCH_CYCLES = 32
+    MAX_Z80_PENDING_CYCLES = AUDIO_CYCLES_PER_FRAME
     VBLANK_START_CYCLES = (CYCLES_PER_FRAME * MegaDrive::VDP::VBLANK_START_CYCLE).fdiv(AUDIO_CYCLES_PER_FRAME).ceil
 
     def initialize
@@ -20,6 +21,8 @@ module MegaDrive
       @frame_count = 0
       @rom_loaded = false
       @render_version = 0
+      @z80_remainder = 0
+      @z80_pending = 0
       reset_perf
     end
 
@@ -50,6 +53,8 @@ module MegaDrive
       @controller.reset
       @cpu.reset if @rom_loaded
       @frame_count = 0
+      @z80_remainder = 0
+      @z80_pending = 0
       reset_perf
       apply_region_configuration
     end
@@ -67,8 +72,8 @@ module MegaDrive
       started = monotonic_time
       cycles = 0
       steps = 0
-      z80_remainder = 0
-      z80_pending = 0
+      z80_remainder = @z80_remainder || 0
+      z80_pending = @z80_pending || 0
       vblank_requested = false
       @audio.begin_frame
       @bus.begin_frame
@@ -88,12 +93,14 @@ module MegaDrive
           z80_total = step_cycles * Z80_CLOCK + z80_remainder
           z80_cycles = z80_total / M68K_CLOCK
           z80_remainder = z80_total % M68K_CLOCK
-          z80_pending += z80_cycles
+          z80_pending = [z80_pending + z80_cycles, MAX_Z80_PENDING_CYCLES].min
           @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
           @bus.ym_frame_cycle = cycles
-          if z80_pending >= Z80_BATCH_CYCLES
-            @bus.run_z80_cycles(z80_pending)
-            z80_pending = 0
+          while z80_pending >= Z80_BATCH_CYCLES
+            ran = @bus.run_z80_cycles(Z80_BATCH_CYCLES)
+            break unless ran.positive?
+
+            z80_pending = [z80_pending - ran, 0].max
           end
           steps += 1
         rescue NotImplementedError
@@ -103,7 +110,12 @@ module MegaDrive
       @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
       @bus.ym_frame_cycle = CYCLES_PER_FRAME
       @vdp.request_vblank! unless vblank_requested
-      @bus.run_z80_cycles(z80_pending) if z80_pending.positive?
+      if z80_pending.positive?
+        ran = @bus.run_z80_cycles(z80_pending)
+        z80_pending = [z80_pending - ran, 0].max if ran.positive?
+      end
+      @z80_remainder = z80_remainder
+      @z80_pending = z80_pending
       @z80_cpu.interrupt(0xFF) if @bus.z80_running?
       cpu_finished = monotonic_time
       @vdp.end_vblank!

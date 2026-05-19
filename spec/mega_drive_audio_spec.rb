@@ -265,6 +265,20 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.z80_cpu.pc).to eq(0)
   end
 
+  it 'preserves queued Z80 budget while the 68k owns the Z80 bus' do
+    emulator = MegaDrive::Emulator.new
+    emulator.bus.write_byte(0xA00000, 0x00) # NOP
+    emulator.bus.write_byte(0xA00001, 0x00) # NOP
+    emulator.bus.write_byte(0xA11200, 0x01)
+    emulator.bus.write_byte(0xA11100, 0x01)
+    emulator.instance_variable_set(:@z80_pending, 64)
+
+    emulator.run_frame
+
+    expect(emulator.instance_variable_get(:@z80_pending)).to be >= 64
+    expect(emulator.z80_cpu.pc).to eq(0)
+  end
+
   it 'resets the YM2612 when the Z80 reset line is asserted' do
     emulator = MegaDrive::Emulator.new
     emulator.ym2612.write_address_1(0xA0)

@@ -46,6 +46,8 @@ module MegaDrive
       @timer_a_counter = 0
       @timer_b_counter = 0
       @timer_control = 0
+      @timer_a_enabled = false
+      @timer_b_enabled = false
       @last_status_read = 0
       @key_mask = Array.new(CHANNELS, 0)
       @fnum = Array.new(CHANNELS, 0)
@@ -173,11 +175,18 @@ module MegaDrive
       when 0x26
         @timer_b_latch = value
       when 0x27
+        old_control = @timer_control
         @timer_control = value
         @status &= ~0x01 if (value & 0x10) != 0
         @status &= ~0x02 if (value & 0x20) != 0
-        load_timer_a if (value & 0x01) != 0
-        load_timer_b if (value & 0x02) != 0
+        timer_a_load = (value & 0x01) != 0
+        timer_b_load = (value & 0x02) != 0
+        old_timer_a_load = (old_control & 0x01) != 0
+        old_timer_b_load = (old_control & 0x02) != 0
+        @timer_a_enabled = timer_a_load
+        @timer_b_enabled = timer_b_load
+        load_timer_a if timer_a_load && !old_timer_a_load
+        load_timer_b if timer_b_load && !old_timer_b_load
       when 0x28
         write_key_on(value)
       when 0x2A
@@ -240,29 +249,37 @@ module MegaDrive
     end
 
     def tick_timers(cycles)
-      if (@timer_control & 0x01) != 0
+      if @timer_a_enabled
         @timer_a_counter -= cycles
-        if @timer_a_counter <= 0
+        while @timer_a_counter <= 0
           @status |= 0x01 if (@timer_control & 0x04) != 0
-          load_timer_a
+          @timer_a_counter += timer_a_period
         end
       end
 
-      return if (@timer_control & 0x02).zero?
+      return unless @timer_b_enabled
 
       @timer_b_counter -= cycles
-      return unless @timer_b_counter <= 0
-
-      @status |= 0x02 if (@timer_control & 0x08) != 0
-      load_timer_b
+      while @timer_b_counter <= 0
+        @status |= 0x02 if (@timer_control & 0x08) != 0
+        @timer_b_counter += timer_b_period
+      end
     end
 
     def load_timer_a
-      @timer_a_counter = [(1024 - (@timer_a_latch & 0x3FF)) * TIMER_TICK_CYCLES, TIMER_TICK_CYCLES].max
+      @timer_a_counter = timer_a_period
     end
 
     def load_timer_b
-      @timer_b_counter = [(256 - (@timer_b_latch & 0xFF)) * 16 * TIMER_TICK_CYCLES, 16 * TIMER_TICK_CYCLES].max
+      @timer_b_counter = timer_b_period
+    end
+
+    def timer_a_period
+      [(1024 - (@timer_a_latch & 0x3FF)) * TIMER_TICK_CYCLES, TIMER_TICK_CYCLES].max
+    end
+
+    def timer_b_period
+      [(256 - (@timer_b_latch & 0xFF)) * 16 * TIMER_TICK_CYCLES, 16 * TIMER_TICK_CYCLES].max
     end
 
     def write_operator_register(port, reg, value)
@@ -527,6 +544,8 @@ module MegaDrive
         timer_a_counter: @timer_a_counter,
         timer_b_counter: @timer_b_counter,
         timer_control: @timer_control,
+        timer_a_enabled: @timer_a_enabled,
+        timer_b_enabled: @timer_b_enabled,
         status: @status,
         busy_cycles: @busy_cycles,
         last_status_read: @last_status_read
@@ -563,6 +582,8 @@ module MegaDrive
       @timer_a_counter = state[:timer_a_counter] || 0
       @timer_b_counter = state[:timer_b_counter] || 0
       @timer_control = state[:timer_control] || 0
+      @timer_a_enabled = state.key?(:timer_a_enabled) ? state[:timer_a_enabled] : ((@timer_control & 0x01) != 0)
+      @timer_b_enabled = state.key?(:timer_b_enabled) ? state[:timer_b_enabled] : ((@timer_control & 0x02) != 0)
       @status = state[:status] || @status
       @busy_cycles = state[:busy_cycles] || @busy_cycles
       @last_status_read = state[:last_status_read] || 0
