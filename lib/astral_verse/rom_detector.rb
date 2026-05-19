@@ -8,7 +8,8 @@ module AstralVerse
     GENERIC_ROM_EXTENSIONS = ['.bin', '.rom'].freeze
     ROM_EXTENSIONS = (SMS_EXTENSIONS + GG_EXTENSIONS + MD_EXTENSIONS + GENERIC_ROM_EXTENSIONS).freeze
 
-    Info = Struct.new(:system, :format, :path, :name, :header_offset, :copier_header, :md_regions, keyword_init: true) do
+    Info = Struct.new(:system, :format, :path, :name, :header_offset, :copier_header, :md_regions,
+      :smd_interleaved, keyword_init: true) do
       def master_system? = system == :sms
       def game_gear? = system == :game_gear
       def mega_drive? = system == :mega_drive
@@ -45,7 +46,15 @@ module AstralVerse
       if md_offset
         return Info.new(system: :mega_drive, format: :mega_drive, path: path, name: name,
           header_offset: md_offset, copier_header: md_offset >= 0x300,
-          md_regions: mega_drive_regions(bytes, md_offset))
+          md_regions: mega_drive_regions(bytes, md_offset), smd_interleaved: false)
+      end
+
+      smd_bytes = deinterleave_smd_bytes(bytes)
+      smd_offset = smd_bytes ? mega_drive_header_offset(smd_bytes) : nil
+      if smd_offset
+        return Info.new(system: :mega_drive, format: :mega_drive_smd, path: path, name: name,
+          header_offset: smd_offset, copier_header: true,
+          md_regions: mega_drive_regions(smd_bytes, smd_offset), smd_interleaved: true)
       end
 
       sms_offset = sms_header_offset(bytes)
@@ -98,6 +107,23 @@ module AstralVerse
       regions
     rescue ArgumentError
       []
+    end
+
+    def deinterleave_smd_bytes(bytes)
+      return nil unless bytes.length > 512
+
+      body_size = bytes.length - 512
+      return nil unless (body_size % 0x4000).zero?
+
+      out = []
+      bytes[512..].each_slice(0x4000) do |block|
+        half = block.length / 2
+        half.times do |index|
+          out << block[half + index].to_i
+          out << block[index].to_i
+        end
+      end
+      out
     end
 
     def sega_text_at?(bytes, offset)

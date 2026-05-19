@@ -729,6 +729,29 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.bus.read_byte(0xA10001)).to eq(0x80)
   end
 
+  it 'deinterleaves SMD copier dumps before loading the Mega Drive bus' do
+    raw = Array.new(0x4000, 0)
+    raw[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    raw[0x100, 4] = 'SEGA'.bytes
+    smd = Array.new(512, 0)
+    raw.each_slice(0x4000) do |block|
+      odd = []
+      even = []
+      (0...(block.length / 2)).each do |index|
+        even << block[index * 2]
+        odd << block[(index * 2) + 1]
+      end
+      smd.concat(odd)
+      smd.concat(even)
+    end
+    info = AstralVerse::RomDetector.detect(smd, path: 'contra.md')
+    emulator = MegaDrive::Emulator.new
+
+    emulator.load_rom_data(smd, info: info)
+
+    expect(emulator.bus.read_word(0x100)).to eq(0x5345)
+  end
+
   it 'uses the Genesis VRAM odd-address word lane mapping' do
     vdp = MegaDrive::VDP.new
     bus = MegaDrive::M68KBus.new(vdp: vdp)

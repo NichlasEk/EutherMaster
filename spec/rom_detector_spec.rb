@@ -28,6 +28,31 @@ RSpec.describe AstralVerse::RomDetector do
     expect(info.copier_header).to be true
   end
 
+  it 'detects interleaved SMD copier dumps even when they have the wrong extension' do
+    raw = bytes(0x4000)
+    raw[0x100, 4] = 'SEGA'.bytes
+    raw[0x1F0, 3] = 'JUE'.bytes
+    smd = bytes(512)
+    raw.each_slice(0x4000) do |block|
+      even = []
+      odd = []
+      (0...(block.length / 2)).each do |index|
+        even << block[index * 2]
+        odd << block[(index * 2) + 1]
+      end
+      smd.concat(odd)
+      smd.concat(even)
+    end
+
+    info = described_class.detect(smd, path: 'contra.md')
+
+    expect(info.system).to eq(:mega_drive)
+    expect(info.format).to eq(:mega_drive_smd)
+    expect(info.smd_interleaved).to be true
+    expect(info.header_offset).to eq(0x100)
+    expect(info.md_regions).to eq(%i[jp us eu])
+  end
+
   it 'detects SMS and Game Gear ROMs from the TMR SEGA header' do
     sms = bytes(0x8000)
     sms[0x7FF0, 8] = 'TMR SEGA'.bytes

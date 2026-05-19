@@ -38,12 +38,13 @@ module MegaDrive
 
     def load_rom_data(data, info: nil)
       @rom_info = info
-      @detected_region_mode, @detected_timing_mode = detect_header_region_modes(data, info)
+      rom_bytes = normalized_rom_bytes(data, info)
+      @detected_region_mode, @detected_timing_mode = detect_header_region_modes(rom_bytes, nil)
       build_audio
       build_video
       @controller = Controller.new
       build_buses
-      @bus.load_rom(normalized_rom_bytes(data, info))
+      @bus.load_rom(rom_bytes)
       apply_region_configuration
       @cpu = M68K.new(@bus)
       @rom_loaded = true
@@ -289,7 +290,22 @@ module MegaDrive
 
     def normalized_rom_bytes(data, info)
       bytes = data.is_a?(String) ? data.bytes : data.dup
+      return deinterleave_smd_bytes(bytes) if info&.smd_interleaved
+
       info&.copier_header && bytes.length > 512 ? bytes[512..] : bytes
+    end
+
+    def deinterleave_smd_bytes(bytes)
+      body = bytes[512..] || []
+      out = []
+      body.each_slice(0x4000) do |block|
+        half = block.length / 2
+        half.times do |index|
+          out << block[half + index].to_i
+          out << block[index].to_i
+        end
+      end
+      out
     end
 
     def detect_header_region_modes(data, info)
