@@ -65,6 +65,19 @@ RSpec.describe SmsEmulator::PSG do
     expect(samples[0, 32].map(&:abs).sum).to be < 0.001
     expect(samples[32, 32].map(&:abs).sum).to be > 0.001
   end
+
+  it 'does not let audio replay overwrite late live volume writes' do
+    psg = described_class.new
+    psg.write(0x80 | 0x08)
+    psg.write(0x00)
+    psg.write(0x90 | 0x00)
+    psg.begin_frame
+    psg.write(0x90 | 0x0F, cycle: 199)
+
+    psg.render_frame_samples(64, 200)
+
+    expect(psg.volumes[0]).to eq(15)
+  end
 end
 
 RSpec.describe SmsEmulator::Memory do

@@ -2,13 +2,16 @@ module MegaDrive
   class Emulator
     attr_reader :cpu, :bus, :z80_cpu, :z80_bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
 
-    CYCLES_PER_FRAME = 127_800
+    LINES_PER_FRAME = 262
+    VBLANK_LINE = 224
+    LINE_M68K_CYCLES = 488
+    LINE_Z80_CYCLES = 228
+    CYCLES_PER_FRAME = LINE_M68K_CYCLES * LINES_PER_FRAME
     M68K_CLOCK = 7_670_454
     Z80_CLOCK = 3_579_545
-    AUDIO_CYCLES_PER_FRAME = 59_736
+    AUDIO_CYCLES_PER_FRAME = LINE_Z80_CYCLES * LINES_PER_FRAME
     Z80_BATCH_CYCLES = 32
     MAX_Z80_PENDING_CYCLES = AUDIO_CYCLES_PER_FRAME
-    VBLANK_START_CYCLES = (CYCLES_PER_FRAME * MegaDrive::VDP::VBLANK_START_CYCLE).fdiv(AUDIO_CYCLES_PER_FRAME).ceil
 
     def initialize
       @timing_mode = :auto
@@ -72,49 +75,60 @@ module MegaDrive
       started = monotonic_time
       cycles = 0
       steps = 0
-      z80_remainder = @z80_remainder || 0
       z80_pending = @z80_pending || 0
       vblank_requested = false
+      next_line = 1
       @audio.begin_frame
       @bus.begin_frame
       while cycles < CYCLES_PER_FRAME
         begin
-          @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
+          current_line = [cycles / LINE_M68K_CYCLES, LINES_PER_FRAME - 1].min
+          @bus.frame_cycle = current_line * LINE_Z80_CYCLES
           @bus.ym_frame_cycle = cycles
           step_cycles = @cpu.step
           cycles += step_cycles
-          @ym2612.tick(step_cycles)
-          if !vblank_requested && cycles >= VBLANK_START_CYCLES
-            @bus.frame_cycle = MegaDrive::VDP::VBLANK_START_CYCLE
-            @vdp.request_vblank!
-            vblank_requested = true
-            cycles = VBLANK_START_CYCLES
-          end
-          z80_total = step_cycles * Z80_CLOCK + z80_remainder
-          z80_cycles = z80_total / M68K_CLOCK
-          z80_remainder = z80_total % M68K_CLOCK
-          z80_pending = [z80_pending + z80_cycles, MAX_Z80_PENDING_CYCLES].min
-          @bus.frame_cycle = cycles * AUDIO_CYCLES_PER_FRAME / CYCLES_PER_FRAME
-          @bus.ym_frame_cycle = cycles
-          while z80_pending >= Z80_BATCH_CYCLES
-            ran = @bus.run_z80_cycles(Z80_BATCH_CYCLES)
-            break unless ran.positive?
-
-            z80_pending = [z80_pending - ran, 0].max
-          end
+          @ym2612.sync_to_cycle(cycles)
           steps += 1
         rescue NotImplementedError
           break
         end
+
+        while next_line <= LINES_PER_FRAME && cycles >= next_line * LINE_M68K_CYCLES
+          if !vblank_requested && next_line >= VBLANK_LINE
+            @bus.frame_cycle = next_line * LINE_Z80_CYCLES
+            @bus.ym_frame_cycle = cycles
+            @vdp.request_vblank!
+            vblank_requested = true
+          end
+
+          z80_pending = [z80_pending + LINE_Z80_CYCLES, MAX_Z80_PENDING_CYCLES].min
+          @bus.frame_cycle = next_line * LINE_Z80_CYCLES
+          @bus.ym_frame_cycle = cycles
+          z80_pending = drain_z80_pending(z80_pending)
+          next_line += 1
+        end
+      end
+
+      while next_line <= LINES_PER_FRAME
+        if !vblank_requested && next_line >= VBLANK_LINE
+          @bus.frame_cycle = next_line * LINE_Z80_CYCLES
+          @bus.ym_frame_cycle = cycles
+          @vdp.request_vblank!
+          vblank_requested = true
+        end
+        z80_pending = [z80_pending + LINE_Z80_CYCLES, MAX_Z80_PENDING_CYCLES].min
+        @bus.frame_cycle = next_line * LINE_Z80_CYCLES
+        @bus.ym_frame_cycle = cycles
+        z80_pending = drain_z80_pending(z80_pending)
+        next_line += 1
       end
       @bus.frame_cycle = AUDIO_CYCLES_PER_FRAME
       @bus.ym_frame_cycle = CYCLES_PER_FRAME
       @vdp.request_vblank! unless vblank_requested
       if z80_pending.positive?
-        ran = @bus.run_z80_cycles(z80_pending)
-        z80_pending = [z80_pending - ran, 0].max if ran.positive?
+        z80_pending = drain_z80_pending(z80_pending, allow_partial: true)
       end
-      @z80_remainder = z80_remainder
+      @z80_remainder = 0
       @z80_pending = z80_pending
       @z80_cpu.interrupt(0xFF) if @bus.z80_running?
       cpu_finished = monotonic_time
@@ -132,6 +146,17 @@ module MegaDrive
 
     def psg = @audio
     def request_pause; end
+
+    def drain_z80_pending(pending, allow_partial: false)
+      while pending >= Z80_BATCH_CYCLES || (allow_partial && pending.positive?)
+        cycles = pending >= Z80_BATCH_CYCLES ? Z80_BATCH_CYCLES : pending
+        ran = @bus.run_z80_cycles(cycles)
+        break unless ran.positive?
+
+        pending = [pending - ran, 0].max
+      end
+      pending
+    end
 
     def rewire_after_snapshot_load
       @audio ||= Audio.new(@sms_psg, @ym2612)

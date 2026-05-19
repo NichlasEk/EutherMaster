@@ -29,6 +29,7 @@ module MegaDrive
       when 0x0000..0x3FFF
         @ram[address & RAM_MASK]
       when 0x4000..0x5FFF
+        @ym2612.sync_to_cycle(@ym_frame_cycle)
         @ym2612.read_register(address)
       when 0x6000..0x7FFF
         0xFF
@@ -46,6 +47,7 @@ module MegaDrive
       when 0x0000..0x3FFF
         @ram[address & RAM_MASK] = value
       when 0x4000..0x5FFF
+        @ym2612.sync_to_cycle(@ym_frame_cycle)
         @ym2612.write_port(address & 0x03, value, cycle: @ym_frame_cycle)
       when 0x6000..0x60FF
         @bank_register = ((@bank_register >> 1) | ((value & 1) << 8)) & 0x1FF

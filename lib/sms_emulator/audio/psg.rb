@@ -124,10 +124,14 @@ module SmsEmulator
       writes = @frame_writes || []
       write_index = 0
       samples = Array.new(count, 0.0)
+      live_state = capture_state
       restore_render_state(@frame_start_state || capture_state)
+      cycle_position = 0.0
+      cycle_step = frame_cycles.to_f / count
 
       count.times do |sample_index|
-        cycle = (sample_index * frame_cycles / count.to_f).floor
+        cycle = cycle_position.to_i
+        cycle_position += cycle_step
         while write_index < writes.length && writes[write_index][:cycle] <= cycle
           apply_write(writes[write_index][:value])
           write_index += 1
@@ -135,6 +139,58 @@ module SmsEmulator
         samples[sample_index] = render_sample(sample_rate)
       end
 
+      rendered_phases = @phases
+      rendered_noise_lfsr = @noise_lfsr
+      rendered_noise_phase = @noise_phase
+      rendered_noise_counter_output = @noise_counter_output
+      rendered_noise_output = @noise_output
+      restore_render_state(live_state)
+      @phases = rendered_phases
+      @noise_lfsr = rendered_noise_lfsr
+      @noise_phase = rendered_noise_phase
+      @noise_counter_output = rendered_noise_counter_output
+      @noise_output = rendered_noise_output
+      samples
+    end
+
+    def capture_frame_job(count = nil, frame_cycles = nil, sample_rate = SAMPLE_RATE)
+      {
+        count: count,
+        frame_cycles: frame_cycles,
+        sample_rate: sample_rate,
+        start: capture_state,
+        writes: (@frame_writes || []).map(&:dup)
+      }
+    end
+
+    def async_renderer
+      self.class.new
+    end
+
+    def render_frame_job(job, count = nil, frame_cycles = nil, sample_rate = nil)
+      count ||= job[:count]
+      frame_cycles ||= job[:frame_cycles]
+      sample_rate ||= job[:sample_rate] || SAMPLE_RATE
+      writes = job[:writes] || []
+      write_index = 0
+      continuity = capture_continuity_state if @async_audio_initialized
+      restore_render_state(job[:start] || capture_state)
+      restore_continuity_state(continuity) if continuity
+      samples = Array.new(count, 0.0)
+      cycle_position = 0.0
+      cycle_step = frame_cycles.to_f / count
+
+      count.times do |sample_index|
+        cycle = cycle_position.to_i
+        cycle_position += cycle_step
+        while write_index < writes.length && writes[write_index][:cycle] <= cycle
+          apply_write(writes[write_index][:value])
+          write_index += 1
+        end
+        samples[sample_index] = render_sample(sample_rate)
+      end
+
+      @async_audio_initialized = true
       samples
     end
 
@@ -194,6 +250,24 @@ module SmsEmulator
         noise_counter_output: @noise_counter_output,
         noise_output: @noise_output
       }
+    end
+
+    def capture_continuity_state
+      {
+        phases: @phases.dup,
+        noise_lfsr: @noise_lfsr,
+        noise_phase: @noise_phase,
+        noise_counter_output: @noise_counter_output,
+        noise_output: @noise_output
+      }
+    end
+
+    def restore_continuity_state(state)
+      @phases = state[:phases].dup
+      @noise_lfsr = state[:noise_lfsr]
+      @noise_phase = state[:noise_phase]
+      @noise_counter_output = state[:noise_counter_output]
+      @noise_output = state[:noise_output]
     end
 
     private

@@ -76,14 +76,24 @@ module MegaDrive
       @dac_sample = 0.0
       @writes = 0
       @write_log = []
+      @last_sync_cycle = 0
       @frame_start_state = capture_render_state
       @frame_writes = []
     end
 
     def begin_frame
       ensure_operator_state!
+      @last_sync_cycle = 0
       @frame_start_state = capture_render_state
       @frame_writes = []
+    end
+
+    def sync_to_cycle(cycle)
+      cycle = cycle.to_i
+      return if cycle <= @last_sync_cycle.to_i
+
+      tick(cycle - @last_sync_cycle.to_i)
+      @last_sync_cycle = cycle
     end
 
     def read_register(address = 0)
@@ -128,7 +138,7 @@ module MegaDrive
       @write_log << { index: @writes, port: port, reg: reg, value: value, cycle: cycle&.to_i } if log
       @write_log.shift while @write_log.length > 512
       @frame_writes << { port: port, reg: reg, value: value, cycle: cycle.to_i } if log && @frame_writes
-      @busy_cycles = WRITE_BUSY_CYCLES
+      @busy_cycles = WRITE_BUSY_CYCLES unless @busy_cycles.positive?
       apply_register(port, reg, value)
     end
 
@@ -142,12 +152,15 @@ module MegaDrive
       ensure_operator_state!
       writes = @frame_writes || []
       write_index = 0
-      live_state = capture_render_state
+      live_state = capture_render_references
       restore_render_state(@frame_start_state || capture_render_state)
       samples = Array.new(count) { [0.0, 0.0] }
+      cycle_position = 0.0
+      cycle_step = frame_cycles.to_f / count
 
       count.times do |sample_index|
-        cycle = (sample_index * frame_cycles / count.to_f).floor
+        cycle = cycle_position.to_i
+        cycle_position += cycle_step
         while write_index < writes.length && writes[write_index][:cycle] <= cycle
           write = writes[write_index]
           write_register(write[:port], write[:reg], write[:value], log: false)
@@ -156,11 +169,85 @@ module MegaDrive
         samples[sample_index] = render_sample(sample_rate)
       end
 
-      rendered_phase = @phase.dup
-      rendered_envelope = @envelope.dup
-      restore_render_state(live_state)
+      rendered_phase = @phase
+      rendered_envelope = @envelope
+      rendered_envelope_stage = @envelope_stage
+      rendered_operator_output = @operator_output
+      rendered_operator_last_output = @operator_last_output
+      restore_render_references(live_state)
       @phase = rendered_phase
       @envelope = rendered_envelope
+      @envelope_stage = rendered_envelope_stage
+      @operator_output = rendered_operator_output
+      @operator_last_output = rendered_operator_last_output
+      samples
+    end
+
+    def render_frame_mono_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
+      ensure_operator_state!
+      writes = @frame_writes || []
+      write_index = 0
+      live_state = capture_render_references
+      restore_render_state(@frame_start_state || capture_render_state)
+      samples = Array.new(count, 0.0)
+      cycle_position = 0.0
+      cycle_step = frame_cycles.to_f / count
+
+      count.times do |sample_index|
+        cycle = cycle_position.to_i
+        cycle_position += cycle_step
+        while write_index < writes.length && writes[write_index][:cycle] <= cycle
+          write = writes[write_index]
+          write_register(write[:port], write[:reg], write[:value], log: false)
+          write_index += 1
+        end
+        samples[sample_index] = render_sample_mono_fast(1.0 / sample_rate)
+      end
+
+      rendered_phase = @phase
+      rendered_envelope = @envelope
+      rendered_envelope_stage = @envelope_stage
+      rendered_operator_output = @operator_output
+      rendered_operator_last_output = @operator_last_output
+      restore_render_references(live_state)
+      @phase = rendered_phase
+      @envelope = rendered_envelope
+      @envelope_stage = rendered_envelope_stage
+      @operator_output = rendered_operator_output
+      @operator_last_output = rendered_operator_last_output
+      samples
+    end
+
+    def capture_frame_job
+      {
+        start: capture_render_state,
+        writes: (@frame_writes || []).map(&:dup)
+      }
+    end
+
+    def render_frame_mono_job(job, count, frame_cycles, sample_rate = SAMPLE_RATE)
+      ensure_operator_state!
+      writes = job[:writes] || []
+      write_index = 0
+      continuity = capture_audio_continuity_state if @async_audio_initialized
+      restore_render_state(job[:start] || capture_render_state)
+      restore_audio_continuity_state(continuity) if continuity
+      samples = Array.new(count, 0.0)
+      cycle_position = 0.0
+      cycle_step = frame_cycles.to_f / count
+
+      count.times do |sample_index|
+        cycle = cycle_position.to_i
+        cycle_position += cycle_step
+        while write_index < writes.length && writes[write_index][:cycle] <= cycle
+          write = writes[write_index]
+          write_register(write[:port], write[:reg], write[:value], log: false)
+          write_index += 1
+        end
+        samples[sample_index] = render_sample_mono_fast(1.0 / sample_rate)
+      end
+
+      @async_audio_initialized = true
       samples
     end
 
@@ -349,20 +436,75 @@ module MegaDrive
     def render_sample(sample_rate)
       left = 0.0
       right = 0.0
+      key_mask = @key_mask
+      pan_l = @pan_l
+      pan_r = @pan_r
+      dac_enabled = @dac_enabled
+      dac_sample = @dac_sample
 
-      CHANNELS.times do |channel|
-        next unless channel_active?(channel)
+      channel = 0
+      while channel < CHANNELS
+        active = !key_mask[channel].zero? || (channel == 5 && dac_enabled)
+        unless active
+          channel += 1
+          next
+        end
 
         sample = channel_sample(channel, sample_rate)
-        sample = @dac_sample if channel == 5 && @dac_enabled
-        left += sample if @pan_l[channel]
-        right += sample if @pan_r[channel]
+        sample = dac_sample if channel == 5 && dac_enabled
+        left += sample if pan_l[channel]
+        right += sample if pan_r[channel]
+        channel += 1
       end
 
       [(left / CHANNELS).clamp(-1.0, 1.0), (right / CHANNELS).clamp(-1.0, 1.0)]
     end
 
+    def render_sample_mono(sample_rate)
+      render_sample_mono_fast(1.0 / sample_rate)
+    end
+
+    def render_sample_mono_fast(sample_step)
+      mixed = 0.0
+      key_mask = @key_mask
+      pan_l = @pan_l
+      pan_r = @pan_r
+      dac_enabled = @dac_enabled
+      dac_sample = @dac_sample
+      envelope = @envelope
+      envelope_stage = @envelope_stage
+
+      channel = 0
+      while channel < CHANNELS
+        base_index = channel * OPERATORS
+        active = !key_mask[channel].zero? ||
+                 (channel == 5 && dac_enabled) ||
+                 (envelope[base_index] > 0.0001 && envelope_stage[base_index] != :off) ||
+                 (envelope[base_index + 1] > 0.0001 && envelope_stage[base_index + 1] != :off) ||
+                 (envelope[base_index + 2] > 0.0001 && envelope_stage[base_index + 2] != :off) ||
+                 (envelope[base_index + 3] > 0.0001 && envelope_stage[base_index + 3] != :off)
+        unless active
+          channel += 1
+          next
+        end
+
+        sample = (channel == 5 && dac_enabled) ? dac_sample : channel_sample_fast(channel, sample_step)
+        if pan_l[channel] && pan_r[channel]
+          mixed += sample
+        elsif pan_l[channel] || pan_r[channel]
+          mixed += sample * 0.5
+        end
+        channel += 1
+      end
+
+      (mixed / CHANNELS).clamp(-1.0, 1.0)
+    end
+
     def channel_sample(channel, sample_rate)
+      channel_sample_fast(channel, 1.0 / sample_rate)
+    end
+
+    def channel_sample_fast(channel, sample_step)
       base = channel_frequency(channel)
       return 0.0 if base <= 0.0
 
@@ -375,48 +517,48 @@ module MegaDrive
 
       sample = case @algorithm[channel]
                when 0
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate, o0 * 2.0)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate, o1 * 2.0)
-                 operator_sample(base_index + 3, base, sample_rate, o2 * 2.0)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step, o0 * 2.0)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step, o1 * 2.0)
+                 operator_sample(base_index + 3, base, sample_step, o2 * 2.0)
                when 1
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate, (o0 + o1) * 1.5)
-                 operator_sample(base_index + 3, base, sample_rate, o2 * 2.0)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step, (o0 + o1) * 1.5)
+                 operator_sample(base_index + 3, base, sample_step, o2 * 2.0)
                when 2
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate, o1 * 2.0)
-                 operator_sample(base_index + 3, base, sample_rate, (o0 + o2) * 1.5)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step, o1 * 2.0)
+                 operator_sample(base_index + 3, base, sample_step, (o0 + o2) * 1.5)
                when 3
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate, o0 * 2.0)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate)
-                 operator_sample(base_index + 3, base, sample_rate, (o1 + o2) * 1.5)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step, o0 * 2.0)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step)
+                 operator_sample(base_index + 3, base, sample_step, (o1 + o2) * 1.5)
                when 4
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate, o0 * 2.0)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate)
-                 o3 = operator_sample(base_index + 3, base, sample_rate, o2 * 2.0)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step, o0 * 2.0)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step)
+                 o3 = operator_sample(base_index + 3, base, sample_step, o2 * 2.0)
                  (o1 + o3) * 0.5
                when 5
-                 mod = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate, mod * 2.0)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate, mod * 2.0)
-                 o3 = operator_sample(base_index + 3, base, sample_rate, mod * 2.0)
+                 mod = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step, mod * 2.0)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step, mod * 2.0)
+                 o3 = operator_sample(base_index + 3, base, sample_step, mod * 2.0)
                  (o1 + o2 + o3) / 3.0
                when 6
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate, o0 * 2.0)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate)
-                 o3 = operator_sample(base_index + 3, base, sample_rate)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step, o0 * 2.0)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step)
+                 o3 = operator_sample(base_index + 3, base, sample_step)
                  (o1 + o2 + o3) / 3.0
                else
-                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_rate, feedback)
-                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_rate)
-                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_rate)
-                 o3 = operator_sample(base_index + 3, base, sample_rate)
+                 o0 = operator_sample(base_index, operator_frequency(channel, 0, base), sample_step, feedback)
+                 o1 = operator_sample(base_index + 1, operator_frequency(channel, 1, base), sample_step)
+                 o2 = operator_sample(base_index + 2, operator_frequency(channel, 2, base), sample_step)
+                 o3 = operator_sample(base_index + 3, base, sample_step)
                  (o0 + o1 + o2 + o3) * 0.25
                end
 
@@ -441,12 +583,12 @@ module MegaDrive
       440.0 * (fnum / 0x26A.to_f) * (2.0**(@operator_block[idx] - 4))
     end
 
-    def operator_sample(idx, base, sample_rate, modulation = 0.0)
+    def operator_sample(idx, base, sample_step, modulation = 0.0)
       @operator_last_output[idx] = @operator_output[idx]
       advance_envelope(idx)
       return @operator_output[idx] = 0.0 if @envelope_stage[idx] == :off && @envelope[idx] <= 0.0001
 
-      phase = @phase[idx] + (base * @multiple_ratio[idx] / sample_rate)
+      phase = @phase[idx] + (base * @multiple_ratio[idx] * sample_step)
       phase -= phase.to_i if phase >= 1.0
       @phase[idx] = phase
       amp = VOLUME_TABLE[@total_level[idx]] * @envelope[idx]
@@ -548,8 +690,69 @@ module MegaDrive
         timer_b_enabled: @timer_b_enabled,
         status: @status,
         busy_cycles: @busy_cycles,
+        last_sync_cycle: @last_sync_cycle,
         last_status_read: @last_status_read
       }
+    end
+
+    def capture_render_references
+      ensure_operator_state!
+      {
+        registers: @registers,
+        key_mask: @key_mask,
+        fnum: @fnum,
+        block: @block,
+        operator_fnum: @operator_fnum,
+        operator_block: @operator_block,
+        algorithm: @algorithm,
+        feedback: @feedback,
+        pan_l: @pan_l,
+        pan_r: @pan_r,
+        total_level: @total_level,
+        multiple: @multiple,
+        multiple_ratio: @multiple_ratio,
+        detune: @detune,
+        attack_rate: @attack_rate,
+        decay_rate: @decay_rate,
+        sustain_rate: @sustain_rate,
+        sustain_level: @sustain_level,
+        release_rate: @release_rate,
+        phase: @phase,
+        envelope: @envelope,
+        envelope_stage: @envelope_stage,
+        operator_output: @operator_output,
+        operator_last_output: @operator_last_output,
+        dac_enabled: @dac_enabled,
+        dac_sample: @dac_sample,
+        timer_a_counter: @timer_a_counter,
+        timer_b_counter: @timer_b_counter,
+        timer_control: @timer_control,
+        timer_a_enabled: @timer_a_enabled,
+        timer_b_enabled: @timer_b_enabled,
+        status: @status,
+        busy_cycles: @busy_cycles,
+        last_sync_cycle: @last_sync_cycle,
+        last_status_read: @last_status_read
+      }
+    end
+
+    def capture_audio_continuity_state
+      ensure_operator_state!
+      {
+        phase: @phase.dup,
+        envelope: @envelope.dup,
+        envelope_stage: @envelope_stage.dup,
+        operator_output: @operator_output.dup,
+        operator_last_output: @operator_last_output.dup
+      }
+    end
+
+    def restore_audio_continuity_state(state)
+      @phase = state[:phase].dup
+      @envelope = state[:envelope].dup
+      @envelope_stage = state[:envelope_stage].dup
+      @operator_output = state[:operator_output].dup
+      @operator_last_output = state[:operator_last_output].dup
     end
 
     def restore_render_state(state)
@@ -586,7 +789,46 @@ module MegaDrive
       @timer_b_enabled = state.key?(:timer_b_enabled) ? state[:timer_b_enabled] : ((@timer_control & 0x02) != 0)
       @status = state[:status] || @status
       @busy_cycles = state[:busy_cycles] || @busy_cycles
+      @last_sync_cycle = state[:last_sync_cycle] || 0
       @last_status_read = state[:last_status_read] || 0
+    end
+
+    def restore_render_references(state)
+      @registers = state[:registers]
+      @key_mask = state[:key_mask]
+      @fnum = state[:fnum]
+      @block = state[:block]
+      @operator_fnum = state[:operator_fnum]
+      @operator_block = state[:operator_block]
+      @algorithm = state[:algorithm]
+      @feedback = state[:feedback]
+      @pan_l = state[:pan_l]
+      @pan_r = state[:pan_r]
+      @total_level = state[:total_level]
+      @multiple = state[:multiple]
+      @multiple_ratio = state[:multiple_ratio]
+      @detune = state[:detune]
+      @attack_rate = state[:attack_rate]
+      @decay_rate = state[:decay_rate]
+      @sustain_rate = state[:sustain_rate]
+      @sustain_level = state[:sustain_level]
+      @release_rate = state[:release_rate]
+      @phase = state[:phase]
+      @envelope = state[:envelope]
+      @envelope_stage = state[:envelope_stage]
+      @operator_output = state[:operator_output]
+      @operator_last_output = state[:operator_last_output]
+      @dac_enabled = state[:dac_enabled]
+      @dac_sample = state[:dac_sample]
+      @timer_a_counter = state[:timer_a_counter]
+      @timer_b_counter = state[:timer_b_counter]
+      @timer_control = state[:timer_control]
+      @timer_a_enabled = state[:timer_a_enabled]
+      @timer_b_enabled = state[:timer_b_enabled]
+      @status = state[:status]
+      @busy_cycles = state[:busy_cycles]
+      @last_sync_cycle = state[:last_sync_cycle]
+      @last_status_read = state[:last_status_read]
     end
   end
 end

@@ -114,6 +114,63 @@ RSpec.describe 'Mega Drive audio' do
     expect(ym2612.read_register & 0x80).to eq(0)
   end
 
+  it 'downmixes both YM2612 stereo channels into the mono audio path' do
+    configure = lambda do |ym2612|
+      ym2612.write_address_1(0x4C)
+      ym2612.write_data(0x00)
+      ym2612.write_address_1(0x5C)
+      ym2612.write_data(0x1F)
+      ym2612.write_address_1(0xA0)
+      ym2612.write_data(0x6A)
+      ym2612.write_address_1(0xA4)
+      ym2612.write_data((4 << 3) | 0x02)
+      ym2612.write_address_1(0xB4)
+      ym2612.write_data(0x80)
+      ym2612.begin_frame
+      ym2612.write_address_1(0x28)
+      ym2612.write_data(0xF0)
+    end
+    stereo_ym = MegaDrive::YM2612.new
+    mono_ym = MegaDrive::YM2612.new
+    configure.call(stereo_ym)
+    configure.call(mono_ym)
+
+    stereo_downmix = stereo_ym.render_frame_samples(128, 1_000).map { |left, right| (left + right) * 0.5 }
+    mono = mono_ym.render_frame_mono_samples(128, 1_000)
+
+    expect(mono).to eq(stereo_downmix)
+    expect(mono.map(&:abs).max).to be > 0.001
+  end
+
+  it 'renders captured Mega Drive audio jobs for the async audio worker' do
+    configure = lambda do |audio|
+      ym2612 = audio.instance_variable_get(:@ym2612)
+      ym2612.write_address_1(0x4C)
+      ym2612.write_data(0x00)
+      ym2612.write_address_1(0x5C)
+      ym2612.write_data(0x1F)
+      ym2612.write_address_1(0xA0)
+      ym2612.write_data(0x6A)
+      ym2612.write_address_1(0xA4)
+      ym2612.write_data((4 << 3) | 0x02)
+      ym2612.write_address_1(0xB4)
+      ym2612.write_data(0xC0)
+      audio.begin_frame
+      ym2612.write_address_1(0x28)
+      ym2612.write_data(0xF0)
+    end
+    live = MegaDrive::Audio.new(MegaDrive::PSG.new, MegaDrive::YM2612.new)
+    async_source = MegaDrive::Audio.new(MegaDrive::PSG.new, MegaDrive::YM2612.new)
+    configure.call(live)
+    configure.call(async_source)
+
+    expected = live.render_frame_samples(128, AstralVerse::PsgPlayer::FRAME_CYCLES)
+    job = async_source.capture_frame_job(128, AstralVerse::PsgPlayer::FRAME_CYCLES)
+    actual = async_source.async_renderer.render_frame_job(job)
+
+    expect(actual).to eq(expected)
+  end
+
   it 'returns fresh YM2612 status only from the status port' do
     ym2612 = MegaDrive::YM2612.new
     ym2612.write_address_1(0xA0)
@@ -123,6 +180,19 @@ RSpec.describe 'Mega Drive audio' do
     expect(ym2612.read_register(0x4000) & 0x80).to eq(0x80)
     ym2612.tick(MegaDrive::YM2612::WRITE_BUSY_CYCLES)
     expect(ym2612.read_register(0x4001) & 0x80).to eq(0x80)
+    expect(ym2612.read_register(0x4000) & 0x80).to eq(0)
+  end
+
+  it 'does not extend YM2612 busy when writes arrive while already busy' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0xA0)
+    ym2612.write_data(0x34)
+    ym2612.tick(MegaDrive::YM2612::WRITE_BUSY_CYCLES - 1)
+    ym2612.write_address_1(0xA4)
+    ym2612.write_data(0x20)
+
+    expect(ym2612.read_register(0x4000) & 0x80).to eq(0x80)
+    ym2612.tick(1)
     expect(ym2612.read_register(0x4000) & 0x80).to eq(0)
   end
 

@@ -530,35 +530,58 @@ module MegaDrive
 
           run_index = 0
           index = row_offset + screen_x
-          while run_index < run
-            color_b = (packed_b >> ((7 - col_b) * 4)) & 0x0F
-            scroll_b = color_b.zero? ? 0 : (attr_b | color_b)
-            color_a = (packed_a >> ((7 - col_a) * 4)) & 0x0F
-            scroll_a = color_a.zero? ? 0 : (attr_a | color_a)
-
-            pixel = if scroll_a != 0
-                      if (scroll_a & 0x100) != 0 || (scroll_b & 0x100).zero?
-                        scroll_a
-                      elsif scroll_b != 0
-                        scroll_b
-                      else
-                        scroll_a
-                      end
-                    else
-                      scroll_b
-                    end
-
-            if pixel != 0
-              framebuffer[index] = pixel
-              drew = true
-            else
+          shift_a = (7 - col_a) * 4
+          shift_b = (7 - col_b) * 4
+          shift_step_a = -4 * step_a
+          shift_step_b = -4 * step_b
+          if packed_a.zero? && packed_b.zero?
+            while run_index < run
               framebuffer[index] = backdrop
+              index += 1
+              run_index += 1
             end
+          elsif packed_a.zero?
+            while run_index < run
+              color_b = (packed_b >> shift_b) & 0x0F
+              framebuffer[index] = color_b.zero? ? backdrop : (attr_b | color_b)
+              shift_b += shift_step_b
+              index += 1
+              run_index += 1
+            end
+            drew = true
+          elsif packed_b.zero? || (attr_a & 0x100) != 0
+            while run_index < run
+              color_a = (packed_a >> shift_a) & 0x0F
+              framebuffer[index] = color_a.zero? ? backdrop : (attr_a | color_a)
+              shift_a += shift_step_a
+              index += 1
+              run_index += 1
+            end
+            drew = true
+          else
+            while run_index < run
+              color_b = (packed_b >> shift_b) & 0x0F
+              color_a = (packed_a >> shift_a) & 0x0F
 
-            col_a += step_a
-            col_b += step_b
-            index += 1
-            run_index += 1
+              if color_a != 0
+                if color_b == 0 || (attr_b & 0x100).zero?
+                  framebuffer[index] = attr_a | color_a
+                else
+                  framebuffer[index] = attr_b | color_b
+                end
+                drew = true
+              elsif color_b != 0
+                framebuffer[index] = attr_b | color_b
+                drew = true
+              else
+                framebuffer[index] = backdrop
+              end
+
+              shift_a += shift_step_a
+              shift_b += shift_step_b
+              index += 1
+              run_index += 1
+            end
           end
           screen_x += run
         end
@@ -607,6 +630,8 @@ module MegaDrive
     end
 
     def draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, screen_x, screen_y, h_cells, v_cells, attr)
+      vram = @vram
+      pattern_cache = @pattern_row_cache
       pattern = attr & 0x07FF
       h_flip = (attr & 0x0800) != 0
       v_flip = (attr & 0x1000) != 0
@@ -615,39 +640,52 @@ module MegaDrive
       width = @screen_width
       height = @screen_height
 
-      sy = 0
       sprite_height = v_cells * 8
       sprite_width = h_cells * 8
-      while sy < sprite_height
-        y = screen_y + sy
-        if y >= 0 && y < height
-          tile_y = sy >> 3
-          row = sy & 7
-          tile_y = v_cells - 1 - tile_y if v_flip
-          row = 7 - row if v_flip
+      sy = screen_y.negative? ? -screen_y : 0
+      sy_end = [sprite_height, height - screen_y].min
+      sx_start = screen_x.negative? ? -screen_x : 0
+      sx_end = [sprite_width, width - screen_x].min
+      return if sy >= sy_end || sx_start >= sx_end
 
-          sx = 0
-          while sx < sprite_width
-            x = screen_x + sx
-            if x >= 0 && x < width
-              tile_x = sx >> 3
-              col = sx & 7
-              tile_x = h_cells - 1 - tile_x if h_flip
-              col = 7 - col if h_flip
-              pixel = pattern_pixel(pattern + tile_x * v_cells + tile_y, row, col)
-              if pixel != 0
-                index = y * width + x
-                unless occupied[index] == stamp
-                  current = framebuffer[index] || 0
-                  if priority || (current & 0x100).zero?
-                    framebuffer[index] = (priority ? 0x100 : 0) | palette | pixel
-                  end
-                  occupied[index] = stamp
-                end
-              end
-            end
-            sx += 1
+      while sy < sy_end
+        y = screen_y + sy
+        row_offset = y * width
+        tile_y = sy >> 3
+        row = sy & 7
+        tile_y = v_cells - 1 - tile_y if v_flip
+        row = 7 - row if v_flip
+
+        sx = sx_start
+        while sx < sx_end
+          x = screen_x + sx
+          tile_x = sx >> 3
+          col = sx & 7
+          tile_x = h_cells - 1 - tile_x if h_flip
+          col = 7 - col if h_flip
+          tile = pattern + tile_x * v_cells + tile_y
+          key = (tile << 3) | row
+          packed = pattern_cache[key]
+          unless packed
+            tile_address = (tile * 32 + row * 4) & 0xFFFF
+            packed = ((vram[tile_address] || 0) << 24) |
+                     ((vram[(tile_address + 1) & 0xFFFF] || 0) << 16) |
+                     ((vram[(tile_address + 2) & 0xFFFF] || 0) << 8) |
+                     (vram[(tile_address + 3) & 0xFFFF] || 0)
+            pattern_cache[key] = packed
           end
+          pixel = (packed >> ((7 - col) * 4)) & 0x0F
+          if pixel != 0
+            index = row_offset + x
+            unless occupied[index] == stamp
+              current = framebuffer[index] || 0
+              if priority || (current & 0x100).zero?
+                framebuffer[index] = (priority ? 0x100 : 0) | palette | pixel
+              end
+              occupied[index] = stamp
+            end
+          end
+          sx += 1
         end
         sy += 1
       end

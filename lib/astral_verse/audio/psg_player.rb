@@ -12,6 +12,10 @@ module AstralVerse
     STREAM_GAIN = 0.38
     AUDIO_OVERSUPPLY = ENV.fetch('ASTRAL_AUDIO_OVERSUPPLY', '1.0005').to_f
     PIPE_PREBUFFER_CHUNKS = ENV.fetch('ASTRAL_AUDIO_PREBUFFER_CHUNKS', '4').to_i.clamp(0, 12)
+    ASYNC_AUDIO = ENV.fetch('ASTRAL_ASYNC_AUDIO', '0') == '1'
+    MAX_ASYNC_JOBS = ENV.fetch('ASTRAL_AUDIO_MAX_JOBS', '8').to_i.clamp(2, 24)
+    DROP_STALE_AUDIO_JOBS = ENV.fetch('ASTRAL_AUDIO_DROP_STALE', '0') == '1'
+    CLOSE_SENTINEL = Object.new.freeze
 
     attr_accessor :volume
 
@@ -28,6 +32,8 @@ module AstralVerse
       @dc_previous_output = 0.0
       @sample_credit = 0.0
       @pipe_prebuffered = false
+      @sink_mutex = Mutex.new
+      setup_async_audio
     rescue StandardError => e
       warn "Audio disabled: #{e.message}"
       @disabled = true
@@ -37,12 +43,24 @@ module AstralVerse
       return if @disabled || !@psg
 
       ensure_sink
+      return enqueue_audio_job if @async_audio
+
       return update_pipe if @sink
+    end
+
+    def cushion(frames = 1)
+      return if @disabled
+
+      ensure_sink
+      return unless @sink && @sink.respond_to?(:cushion_frames)
+
+      @sink_mutex.synchronize { @sink&.cushion_frames(frames.to_i.clamp(0, 8)) }
     end
 
     def stop
       @channels&.each { |channel| channel&.stop }
       @channels = Array.new(4)
+      stop_async_audio
       @sink&.close
       @sink = nil
     end
@@ -59,11 +77,92 @@ module AstralVerse
       @disabled = true
     end
 
+    def setup_async_audio
+      return unless ASYNC_AUDIO && @psg.respond_to?(:capture_frame_job)
+
+      @async_renderer = @psg.respond_to?(:async_renderer) ? @psg.async_renderer : @psg.class.new
+      @audio_jobs = Queue.new
+      @async_audio = true
+      @audio_worker = Thread.new { audio_worker_loop }
+      @audio_worker.abort_on_exception = false
+    end
+
+    def stop_async_audio
+      return unless @audio_jobs
+
+      @async_audio = false
+      @audio_jobs << CLOSE_SENTINEL
+      @audio_worker&.join(0.35)
+      @audio_jobs = nil
+      @audio_worker = nil
+      @async_renderer = nil
+    end
+
+    def enqueue_audio_job
+      count = samples_for_frame
+      return if count <= 0
+
+      prebuffer_pipe(count) unless @pipe_prebuffered
+      drop_stale_audio_jobs
+      @audio_jobs << [@psg.capture_frame_job(count, FRAME_CYCLES, SAMPLE_RATE), @volume.to_f.clamp(0.0, 1.0)]
+    rescue IOError, Errno::EPIPE
+      @sink&.close
+      @sink = nil
+      @disabled = true
+    end
+
+    def audio_worker_loop
+      loop do
+        item = @audio_jobs.pop
+        break if item.equal?(CLOSE_SENTINEL)
+
+        if DROP_STALE_AUDIO_JOBS
+          item = latest_audio_job(item)
+          break if item.equal?(CLOSE_SENTINEL)
+        end
+
+        job, volume = item
+        samples = @async_renderer.render_frame_job(job)
+        samples = dc_block!(samples)
+        @sink_mutex.synchronize { @sink&.write_samples(samples, STREAM_GAIN * volume) }
+        Thread.pass
+      end
+    rescue IOError, Errno::EPIPE
+      @disabled = true
+    rescue StandardError => e
+      warn "Audio worker disabled: #{e.message}"
+      @disabled = true
+    end
+
+    def drop_stale_audio_jobs
+      return unless DROP_STALE_AUDIO_JOBS
+
+      while @audio_jobs.length >= MAX_ASYNC_JOBS - 1
+        @audio_jobs.pop(true)
+      end
+    rescue ThreadError
+      nil
+    end
+
+    def latest_audio_job(item)
+      latest = item
+      loop do
+        candidate = @audio_jobs.pop(true)
+        return candidate if candidate.equal?(CLOSE_SENTINEL)
+
+        latest = candidate
+      end
+    rescue ThreadError
+      latest
+    end
+
     def update_pipe
       count = samples_for_frame
+      return if count <= 0
+
       prebuffer_pipe(count) unless @pipe_prebuffered
       samples = dc_block!(@psg.render_frame_samples(count, FRAME_CYCLES, SAMPLE_RATE))
-      @sink.write_samples(samples, STREAM_GAIN * @volume.to_f.clamp(0.0, 1.0))
+      @sink_mutex.synchronize { @sink.write_samples(samples, STREAM_GAIN * @volume.to_f.clamp(0.0, 1.0)) }
     rescue IOError, Errno::EPIPE
       @sink&.close
       @sink = nil
@@ -71,14 +170,17 @@ module AstralVerse
     end
 
     def samples_for_frame
-      @sample_credit += SAMPLE_RATE * FRAME_CYCLES / @psg.class::CLOCK * AUDIO_OVERSUPPLY
+      frame_samples = SAMPLE_RATE * FRAME_CYCLES / @psg.class::CLOCK
+      @sample_credit += frame_samples * AUDIO_OVERSUPPLY
       count = @sample_credit.floor
       @sample_credit -= count
       count
     end
 
     def prebuffer_pipe(sample_count)
-      PIPE_PREBUFFER_CHUNKS.times { @sink.write_samples(Array.new(sample_count, 0.0), STREAM_GAIN) }
+      @sink_mutex.synchronize do
+        PIPE_PREBUFFER_CHUNKS.times { @sink.write_samples(Array.new(sample_count, 0.0), STREAM_GAIN) }
+      end
       @pipe_prebuffered = true
     end
 
@@ -268,13 +370,16 @@ module AstralVerse
 
     class SdlSink
       BYTES_PER_SAMPLE = 2
-      PREBUFFER_MS = ENV.fetch('ASTRAL_SDL_AUDIO_PREBUFFER_MS', '90').to_i.clamp(20, 250)
-      MAX_QUEUE_MS = ENV.fetch('ASTRAL_SDL_AUDIO_MAX_QUEUE_MS', '220').to_i.clamp(80, 600)
+      PREBUFFER_MS = ENV.fetch('ASTRAL_SDL_AUDIO_PREBUFFER_MS', '140').to_i.clamp(20, 350)
+      LOW_WATER_MS = ENV.fetch('ASTRAL_SDL_AUDIO_LOW_WATER_MS', '120').to_i.clamp(20, 300)
+      MAX_QUEUE_MS = ENV.fetch('ASTRAL_SDL_AUDIO_MAX_QUEUE_MS', '320').to_i.clamp(80, 800)
 
       def initialize(sample_rate)
         @sample_rate = sample_rate
         @stream = open_stream
         @closed = false
+        @last_pcm = 0
+        @last_pcm_frame = []
         prebuffer_silence
         SDL3.check(SDL3.resume_audio_stream_device(@stream), 'SDL_ResumeAudioStreamDevice')
       end
@@ -283,9 +388,37 @@ module AstralVerse
         raise IOError, 'SDL audio stream closed' if @closed
 
         queued = SDL3.get_audio_stream_queued(@stream)
-        SDL3.clear_audio_stream(@stream) if queued > max_queue_bytes
-        data = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }.pack('s<*')
+        if queued > max_queue_bytes
+          SDL3.clear_audio_stream(@stream)
+          queued = 0
+        end
+        pcm = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }
+        @last_pcm = pcm[-1] || @last_pcm
+        @last_pcm_frame = pcm unless pcm.empty?
+        pad_samples = low_water_samples - (queued / BYTES_PER_SAMPLE) - pcm.length
+        if pad_samples.positive?
+          data = (pcm + loop_pcm(pad_samples)).pack('s<*')
+        else
+          data = pcm.pack('s<*')
+        end
         SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData')
+      end
+
+      def cushion_frames(frames)
+        return if @closed || frames <= 0
+
+        queued = SDL3.get_audio_stream_queued(@stream)
+        return if queued >= low_water_samples * BYTES_PER_SAMPLE
+
+        samples = [low_water_samples - (queued / BYTES_PER_SAMPLE), frame_samples * frames].min
+        return if samples <= 0
+
+        data = loop_pcm(samples).pack('s<*')
+        SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData cushion')
+      end
+
+      def queued_samples
+        SDL3.get_audio_stream_queued(@stream) / BYTES_PER_SAMPLE
       end
 
       def close
@@ -313,6 +446,31 @@ module AstralVerse
 
       def max_queue_bytes
         (@sample_rate * MAX_QUEUE_MS / 1000.0).round * BYTES_PER_SAMPLE
+      end
+
+      def low_water_samples
+        (@sample_rate * LOW_WATER_MS / 1000.0).round
+      end
+
+      def frame_samples
+        (@sample_rate / 60.0).round
+      end
+
+      def loop_pcm(samples)
+        frame = @last_pcm_frame
+        return Array.new(samples, @last_pcm) if frame.empty?
+
+        output = Array.new(samples)
+        index = 0
+        frame_index = 0
+        frame_length = frame.length
+        while index < samples
+          output[index] = frame[frame_index]
+          frame_index += 1
+          frame_index = 0 if frame_index >= frame_length
+          index += 1
+        end
+        output
       end
     end
   end

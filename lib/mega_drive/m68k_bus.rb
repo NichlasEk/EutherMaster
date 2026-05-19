@@ -53,7 +53,10 @@ module MegaDrive
 
     def read_byte(address)
       address &= ADDRESS_MASK
-      return @ym2612.read_register(address) if ym2612_address?(address)
+      if ym2612_address?(address)
+        @ym2612.sync_to_cycle(@ym_frame_cycle)
+        return @ym2612.read_register(address)
+      end
       return read_vdp_hv_counter_byte(address) if vdp_hv_counter_address?(address)
       return @version_register if io_pair?(address, IO_VERSION_BASE)
       return @controller ? @controller.read_data : 0x7F if io_pair?(address, IO_PORT_1_DATA_BASE)
@@ -73,6 +76,8 @@ module MegaDrive
       return @vdp.read_control if vdp_control_address?(address)
       return @vdp.read_hv_counter if vdp_hv_counter_address?(address)
       return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
+      return read_work_ram_word(address) if work_ram_address?(address)
+      return read_rom_word(address) if cartridge_rom_address?(address)
       return read_byte(address) if io_address?(address)
 
       ((read_byte(address) << 8) | read_byte(address + 1)) & 0xFFFF
@@ -87,6 +92,7 @@ module MegaDrive
       value &= 0xFF
 
       if ym2612_address?(address)
+        @ym2612.sync_to_cycle(@ym_frame_cycle)
         @ym2612.write_port(address & 0x03, value, cycle: @ym_frame_cycle)
       elsif vdp_data_address?(address)
         @vdp.write_data_byte(address, value)
@@ -128,6 +134,11 @@ module MegaDrive
         return
       elsif z80_ram_mirror_address?(address)
         write_z80_ram(address, (value >> 8) & 0xFF)
+        return
+      elsif work_ram_address?(address)
+        offset = address & WORK_RAM_MASK
+        @work_ram[offset] = (value >> 8) & 0xFF
+        @work_ram[(offset + 1) & WORK_RAM_MASK] = value & 0xFF
         return
       end
 
@@ -234,6 +245,16 @@ module MegaDrive
     def mirrored_z80_word(address)
       value = read_z80_ram(address)
       (value << 8) | value
+    end
+
+    def read_rom_word(address)
+      length = @rom.length
+      ((@rom[address % length] << 8) | @rom[(address + 1) % length]) & 0xFFFF
+    end
+
+    def read_work_ram_word(address)
+      offset = address & WORK_RAM_MASK
+      ((@work_ram[offset] << 8) | @work_ram[(offset + 1) & WORK_RAM_MASK]) & 0xFFFF
     end
 
     def write_z80_ram(address, value)

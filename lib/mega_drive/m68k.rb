@@ -12,7 +12,7 @@ module MegaDrive
     SIZE_BYTE = :byte
     SIZE_WORD = :word
     SIZE_LONG = :long
-    BUSY_WAIT_BRANCH_CYCLES = 4096
+    BUSY_WAIT_BRANCH_CYCLES = 976
 
     attr_reader :bus, :d, :pc, :usp, :ssp, :cycles, :total_cycles
     attr_accessor :stopped

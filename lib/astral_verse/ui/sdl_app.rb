@@ -471,7 +471,11 @@ module AstralVerse
             @last_vision += FRAME_MS
             frames += 1
           end
-          @last_vision = now if frames == MAX_CATCHUP_FRAMES && now - @last_vision >= FRAME_MS
+          if frames == MAX_CATCHUP_FRAMES && now - @last_vision >= FRAME_MS
+            dropped_frames = ((now - @last_vision) / FRAME_MS).floor
+            @audio_player&.cushion(dropped_frames)
+            @last_vision = now
+          end
         else
           @running = false
         end
