@@ -275,6 +275,17 @@ module MegaDrive
       source & 0xFF_FFFE
     end
 
+    def dma_vram_copy_source_address
+      (@registers[21] | (@registers[22] << 8) | ((@registers[23] & 0x3F) << 16)) & 0xFFFF
+    end
+
+    def write_dma_vram_copy_source_address(source)
+      source &= 0xFFFF
+      @registers[21] = source & 0xFF
+      @registers[22] = (source >> 8) & 0xFF
+      @registers[23] = (@registers[23] & 0xC0) | ((source >> 16) & 0x3F)
+    end
+
     def dma_mode
       @registers[23] & 0xC0
     end
@@ -306,13 +317,15 @@ module MegaDrive
     end
 
     def perform_vram_copy
-      source = dma_source_address
+      source = dma_vram_copy_source_address
       dma_length.times do
-        write_vram_word(@address, read_vram_word(source & 0xFFFF))
-        increment_dma_source_address
+        value = ((@vram[source & 0xFFFF] || 0) << 8) | (@vram[(source + 1) & 0xFFFF] || 0)
+        write_vram_word(@address, value)
+        decrement_dma_length
         source = (source + 2) & 0xFFFF
         increment_address
       end
+      write_dma_vram_copy_source_address(source)
       @dma_active = false
     end
 
@@ -416,8 +429,8 @@ module MegaDrive
         width.times do |screen_x|
           source_x = @source_x_cache[screen_x]
           scroll_b = plane_pixel(:b, source_x, source_y)
-          scroll_a = if @window_enabled_cache
-                       window_pixel(source_x, source_y) || plane_pixel(:a, source_x, source_y)
+          scroll_a = if @window_enabled_cache && window_active?(source_x, source_y)
+                       window_pixel(source_x, source_y)
                      else
                        plane_pixel(:a, source_x, source_y)
                      end
@@ -707,14 +720,18 @@ module MegaDrive
     end
 
     def window_pixel(source_x, source_y)
-      range = @window_range_cache[source_y]
-      return nil unless range && source_x >= range[0] && source_x < range[1]
+      return nil unless window_active?(source_x, source_y)
 
       h_cell = source_x / 8
       v_cell = source_y / 8
       entry = read_name_table_word(window_base, window_width_cells, v_cell, h_cell)
       pixel = tile_pixel(entry, source_y & 7, source_x & 7)
       encode_pixel(entry, pixel)
+    end
+
+    def window_active?(source_x, source_y)
+      range = @window_range_cache[source_y]
+      range && source_x >= range[0] && source_x < range[1]
     end
 
     def resolve_pixel(sprite, scroll_a, scroll_b)
@@ -946,17 +963,25 @@ module MegaDrive
     end
 
     def plane_dimensions
-      h = case @registers[16] & 0x03
-          when 1 then 64
-          when 3 then 128
-          else 32
-          end
-      v = case (@registers[16] >> 4) & 0x03
-          when 1 then 64
-          when 3 then 128
-          else 32
-          end
-      [h, v]
+      case @registers[16] & 0x33
+      when 0x00 then [32, 32]
+      when 0x01 then [64, 32]
+      when 0x02 then [64, 1]
+      when 0x03 then [128, 32]
+      when 0x10 then [32, 64]
+      when 0x11 then [64, 64]
+      when 0x12 then [64, 1]
+      when 0x13 then [128, 32]
+      when 0x20 then [32, 64]
+      when 0x21 then [64, 64]
+      when 0x22 then [64, 1]
+      when 0x23 then [128, 64]
+      when 0x30 then [32, 128]
+      when 0x31 then [64, 64]
+      when 0x32 then [64, 1]
+      when 0x33 then [128, 128]
+      else [32, 32]
+      end
     end
 
     def scroll_values

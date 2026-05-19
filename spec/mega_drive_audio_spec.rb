@@ -471,6 +471,60 @@ RSpec.describe 'Mega Drive audio' do
     expect(vdp.palette_rgba[0].bytes[0, 3]).to eq([0, 87, 255])
   end
 
+  it 'uses Mega Drive hardware plane dimensions for prohibited size register combinations' do
+    vdp = MegaDrive::VDP.new
+
+    {
+      0x00 => [32, 32],
+      0x02 => [64, 1],
+      0x13 => [128, 32],
+      0x22 => [64, 1],
+      0x23 => [128, 64],
+      0x31 => [64, 64],
+      0x33 => [128, 128]
+    }.each do |register_value, expected|
+      vdp.write_control(0x9000 | register_value)
+      expect(vdp.send(:plane_dimensions)).to eq(expected)
+    end
+  end
+
+  it 'does not fall through to Scroll A behind transparent Window pixels' do
+    vdp = MegaDrive::VDP.new
+
+    vdp.write_control(0x8144) # display enable
+    vdp.write_control(0x8200 | 0x30) # Scroll A at C000
+    vdp.write_control(0x8300 | 0x02) # Window at 1000
+    vdp.write_control(0x8400) # Scroll B at 0000
+    vdp.write_control(0x8700) # backdrop color 0
+    vdp.write_control(0x9100) # Window covers from left edge
+    vdp.write_control(0x9280) # Window covers all visible rows
+
+    # Tile 1 is opaque color 1, tile 2 is transparent, tile 3 is opaque color 3.
+    vdp.write_control(0x4020)
+    vdp.write_control(0x0000)
+    8.times { vdp.write_data(0x1111) }
+    vdp.write_control(0x4040)
+    vdp.write_control(0x0000)
+    8.times { vdp.write_data(0x0000) }
+    vdp.write_control(0x4060)
+    vdp.write_control(0x0000)
+    8.times { vdp.write_data(0x3333) }
+
+    vdp.write_control(0x4000) # Scroll B nametable tile 1
+    vdp.write_control(0x0000)
+    vdp.write_data(0x0001)
+    vdp.write_control(0x4000 | 0xC000) # Scroll A nametable tile 3
+    vdp.write_control(0x0000)
+    vdp.write_data(0x0003)
+    vdp.write_control(0x4000 | 0x1000) # Window nametable transparent tile 2
+    vdp.write_control(0x0000)
+    vdp.write_data(0x0002)
+
+    vdp.render_frame
+
+    expect(vdp.framebuffer[0] & 0x0F).to eq(1)
+  end
+
   it 'binds the UI-visible framebuffer to the Mega Drive VDP' do
     emulator = MegaDrive::Emulator.new
 
@@ -563,6 +617,29 @@ RSpec.describe 'Mega Drive audio' do
     expect(vdp.vram[5]).to eq(0xA5)
     expect(vdp.vram[6]).to eq(0xC3)
     expect(vdp.vram[7]).to eq(0x3C)
+  end
+
+  it 'uses raw VRAM byte addresses for VRAM copy DMA sources' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+    vdp.vram[0x0100] = 0x11
+    vdp.vram[0x0101] = 0x22
+    vdp.vram[0x0200] = 0x33
+    vdp.vram[0x0201] = 0x44
+
+    bus.write_word(0xC00004, 0x8114) # DMA enable
+    bus.write_word(0xC00004, 0x9301) # length low
+    bus.write_word(0xC00004, 0x9400) # length high
+    bus.write_word(0xC00004, 0x9500) # raw VRAM copy source low
+    bus.write_word(0xC00004, 0x9601) # raw VRAM copy source high => $0100, not $0200
+    bus.write_word(0xC00004, 0x97C0) # VRAM copy
+    bus.write_word(0xC00004, 0x4004) # VRAM write address 4
+    bus.write_word(0xC00004, 0x0080) # DMA start
+
+    expect(vdp.vram[4]).to eq(0x11)
+    expect(vdp.vram[5]).to eq(0x22)
+    expect(vdp.registers[21]).to eq(0x02)
+    expect(vdp.registers[22]).to eq(0x01)
   end
 
   it 'maps zero MD CRAM entries to black instead of the SMS fallback palette' do
