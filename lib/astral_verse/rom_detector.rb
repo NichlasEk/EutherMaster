@@ -8,7 +8,7 @@ module AstralVerse
     GENERIC_ROM_EXTENSIONS = ['.bin', '.rom'].freeze
     ROM_EXTENSIONS = (SMS_EXTENSIONS + GG_EXTENSIONS + MD_EXTENSIONS + GENERIC_ROM_EXTENSIONS).freeze
 
-    Info = Struct.new(:system, :format, :path, :name, :header_offset, :copier_header, keyword_init: true) do
+    Info = Struct.new(:system, :format, :path, :name, :header_offset, :copier_header, :md_regions, keyword_init: true) do
       def master_system? = system == :sms
       def game_gear? = system == :game_gear
       def mega_drive? = system == :mega_drive
@@ -44,7 +44,8 @@ module AstralVerse
       md_offset = mega_drive_header_offset(bytes)
       if md_offset
         return Info.new(system: :mega_drive, format: :mega_drive, path: path, name: name,
-          header_offset: md_offset, copier_header: md_offset >= 0x300)
+          header_offset: md_offset, copier_header: md_offset >= 0x300,
+          md_regions: mega_drive_regions(bytes, md_offset))
       end
 
       sms_offset = sms_header_offset(bytes)
@@ -73,6 +74,30 @@ module AstralVerse
       return 0x300 if sega_text_at?(bytes, 0x300)
 
       nil
+    end
+
+    def mega_drive_regions(bytes, header_offset)
+      field = bytes[(header_offset || 0) + 0xF0, 3]
+      return [] unless field && field.length >= 1
+
+      chars = field.map { |byte| byte.to_i.chr.upcase }
+      old_style = []
+      old_style << :jp if chars.include?('J')
+      old_style << :us if chars.include?('U')
+      old_style << :eu if chars.include?('E')
+      return old_style if old_style.any?
+
+      value = chars[0].to_i(16)
+      return [] if value.zero? && chars[0] != '0'
+
+      regions = []
+      regions << :jp if (value & 0x01) != 0
+      regions << :jp if (value & 0x02) != 0 && !regions.include?(:jp)
+      regions << :us if (value & 0x04) != 0
+      regions << :eu if (value & 0x08) != 0
+      regions
+    rescue ArgumentError
+      []
     end
 
     def sega_text_at?(bytes, offset)

@@ -3,6 +3,7 @@ module MegaDrive
     attr_reader :cpu, :bus, :z80_cpu, :z80_bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
 
     LINES_PER_FRAME = 262
+    PAL_LINES_PER_FRAME = 313
     VBLANK_LINE = 224
     LINE_M68K_CYCLES = 488
     LINE_Z80_CYCLES = 228
@@ -16,6 +17,8 @@ module MegaDrive
     def initialize
       @timing_mode = :auto
       @region_mode = :auto
+      @detected_timing_mode = nil
+      @detected_region_mode = nil
       build_audio
       build_video
       @controller = Controller.new
@@ -35,6 +38,7 @@ module MegaDrive
 
     def load_rom_data(data, info: nil)
       @rom_info = info
+      @detected_region_mode, @detected_timing_mode = detect_header_region_modes(data, info)
       build_audio
       build_video
       @controller = Controller.new
@@ -79,9 +83,9 @@ module MegaDrive
       z80_clock = 0.0
       vblank_requested = false
       next_line = 1
-      lines_per_frame = LINES_PER_FRAME
-      cycles_per_frame = CYCLES_PER_FRAME
-      audio_cycles_per_frame = AUDIO_CYCLES_PER_FRAME
+      lines_per_frame = current_lines_per_frame
+      cycles_per_frame = current_m68k_frame_cycles
+      audio_cycles_per_frame = frame_cycles
       @audio.begin_frame
       @bus.begin_frame
       while cycles < cycles_per_frame
@@ -156,11 +160,11 @@ module MegaDrive
     def request_pause; end
 
     def frame_rate
-      60.0
+      effective_timing_mode == :pal ? 50.0 : 60.0
     end
 
     def frame_cycles
-      AUDIO_CYCLES_PER_FRAME
+      LINE_Z80_CYCLES * current_lines_per_frame
     end
 
     def drain_z80_pending(pending, allow_partial: false)
@@ -244,17 +248,33 @@ module MegaDrive
       @bus.version_register = md_version_register if @bus
       if @audio
         @audio.frame_cycles = frame_cycles
-        @audio.ym_frame_cycles = CYCLES_PER_FRAME
+        @audio.ym_frame_cycles = current_m68k_frame_cycles
       end
     end
 
     def md_version_register
-      overseas = case @region_mode
+      overseas = case effective_region_mode
                  when :jp then false
                  else true
                  end
-      pal = @timing_mode == :pal
+      pal = effective_timing_mode == :pal
       0x80 | (pal ? 0x40 : 0) | (overseas ? 0x20 : 0)
+    end
+
+    def effective_timing_mode
+      @timing_mode == :auto ? (@detected_timing_mode || :ntsc) : @timing_mode
+    end
+
+    def effective_region_mode
+      @region_mode == :auto ? (@detected_region_mode || :us) : @region_mode
+    end
+
+    def current_lines_per_frame
+      effective_timing_mode == :pal ? PAL_LINES_PER_FRAME : LINES_PER_FRAME
+    end
+
+    def current_m68k_frame_cycles
+      LINE_M68K_CYCLES * current_lines_per_frame
     end
 
     def normalize_timing_mode(mode)
@@ -270,6 +290,43 @@ module MegaDrive
     def normalized_rom_bytes(data, info)
       bytes = data.is_a?(String) ? data.bytes : data.dup
       info&.copier_header && bytes.length > 512 ? bytes[512..] : bytes
+    end
+
+    def detect_header_region_modes(data, info)
+      bytes = data.is_a?(String) ? data.bytes : data
+      header_offset = info&.header_offset || mega_drive_header_offset(bytes)
+      return [nil, nil] unless header_offset
+
+      field = bytes[header_offset + 0xF0, 3]
+      return [nil, nil] unless field && field.any?
+
+      chars = field.map { |byte| byte.to_i.chr.upcase }
+      old_jp = chars.include?('J')
+      old_us = chars.include?('U')
+      old_eu = chars.include?('E')
+      if old_jp || old_us || old_eu
+        return [:us, :ntsc] if old_us
+        return [:jp, :ntsc] if old_jp
+        return [:eu, :pal]
+      end
+
+      first = chars.first
+      return [nil, nil] unless first&.match?(/\A[0-9A-F]\z/)
+
+      value = first.to_i(16)
+      return [:us, :ntsc] if (value & 0x04) != 0
+      return [:jp, :ntsc] if (value & 0x01) != 0
+      return [:eu, :pal] if (value & 0x08) != 0
+      return [:jp, :pal] if (value & 0x02) != 0
+
+      [nil, nil]
+    end
+
+    def mega_drive_header_offset(bytes)
+      return 0x100 if bytes.length >= 0x104 && bytes[0x100, 4].pack('C*') == 'SEGA'
+      return 0x300 if bytes.length >= 0x304 && bytes[0x300, 4].pack('C*') == 'SEGA'
+
+      nil
     end
 
     def monotonic_time

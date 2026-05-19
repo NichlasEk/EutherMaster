@@ -675,6 +675,60 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.bus.read_byte(0xA10001)).to eq(0x80)
   end
 
+  it 'auto-detects old-style Europe-only Mega Drive headers as PAL Europe' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = ' E '.bytes
+
+    emulator.load_rom_data(rom, info: AstralVerse::RomDetector.detect(rom, path: 'sonic3.md'))
+
+    expect(emulator.frame_rate).to eq(50.0)
+    expect(emulator.frame_cycles).to eq(MegaDrive::Emulator::LINE_Z80_CYCLES * MegaDrive::Emulator::PAL_LINES_PER_FRAME)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0xE0)
+  end
+
+  it 'auto-detects all-region old-style Mega Drive headers as NTSC overseas' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = 'JUE'.bytes
+
+    emulator.load_rom_data(rom, info: AstralVerse::RomDetector.detect(rom, path: 'world.md'))
+
+    expect(emulator.frame_rate).to eq(60.0)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0xA0)
+  end
+
+  it 'auto-detects new-style Europe-only Mega Drive headers as PAL Europe' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = '8  '.bytes
+
+    emulator.load_rom_data(rom, info: AstralVerse::RomDetector.detect(rom, path: 'euro.md'))
+
+    expect(emulator.frame_rate).to eq(50.0)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0xE0)
+  end
+
+  it 'lets manual Mega Drive timing and region override header auto-detection' do
+    emulator = MegaDrive::Emulator.new
+    rom = Array.new(0x200, 0)
+    rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = 'E  '.bytes
+
+    emulator.load_rom_data(rom, info: AstralVerse::RomDetector.detect(rom, path: 'pal.md'))
+    emulator.configure_region(timing: :ntsc, region: :jp)
+
+    expect(emulator.frame_rate).to eq(60.0)
+    expect(emulator.bus.read_byte(0xA10001)).to eq(0x80)
+  end
+
   it 'uses the Genesis VRAM odd-address word lane mapping' do
     vdp = MegaDrive::VDP.new
     bus = MegaDrive::M68KBus.new(vdp: vdp)

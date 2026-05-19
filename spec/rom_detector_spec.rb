@@ -8,12 +8,14 @@ RSpec.describe AstralVerse::RomDetector do
   it 'detects Mega Drive ROMs from the SEGA header' do
     rom = bytes(0x200)
     rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = 'JUE'.bytes
 
     info = described_class.detect(rom, path: 'sonic.bin')
 
     expect(info.system).to eq(:mega_drive)
     expect(info.label).to eq('MD')
     expect(info.header_offset).to eq(0x100)
+    expect(info.md_regions).to eq(%i[jp us eu])
   end
 
   it 'detects copier-headered Mega Drive ROMs' do
@@ -45,5 +47,20 @@ RSpec.describe AstralVerse::RomDetector do
     expect(described_class.detect(bytes(0x1000), path: 'homebrew.md').system).to eq(:mega_drive)
     expect(described_class.detect(bytes(0x1000), path: 'unknown.bin')).to be_nil
   end
-end
 
+  it 'parses old-style Mega Drive region fields from all three bytes' do
+    rom = bytes(0x200)
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = ' E '.bytes
+
+    expect(described_class.detect(rom, path: 'pal.md').md_regions).to eq([:eu])
+  end
+
+  it 'parses new-style Mega Drive region bitfields' do
+    rom = bytes(0x200)
+    rom[0x100, 4] = 'SEGA'.bytes
+    rom[0x1F0, 3] = 'C  '.bytes
+
+    expect(described_class.detect(rom, path: 'world.md').md_regions).to eq(%i[us eu])
+  end
+end
