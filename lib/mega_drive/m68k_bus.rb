@@ -21,8 +21,8 @@ module MegaDrive
     VDP_HV_COUNTER = 0x00C0_0008
     WORK_RAM_BASE = 0x00E0_0000
     WORK_RAM_MASK = 0x0000_FFFF
-    Z80_TO_M68K_CYCLE_RATIO = 488.0 / 228.0
-    M68K_TO_Z80_CYCLE_RATIO = 228.0 / 488.0
+    Z80_TO_M68K_CYCLE_RATIO = 7_670_454.0 / 3_579_545.0
+    M68K_TO_Z80_CYCLE_RATIO = 3_579_545.0 / 7_670_454.0
 
     attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
 
@@ -169,7 +169,7 @@ module MegaDrive
 
       budget = cycles.to_i
       ran = 0
-      start_frame_cycle = @frame_cycle.to_i
+      start_frame_cycle = @frame_cycle.to_f
       start_ym_cycle = @ym_frame_cycle.to_f
       while ran < budget
         @z80_bus.frame_cycle = start_frame_cycle + ran

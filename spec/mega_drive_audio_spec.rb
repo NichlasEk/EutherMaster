@@ -111,6 +111,22 @@ RSpec.describe 'Mega Drive audio' do
     expect(ym2612.read_register & 0x01).to eq(0)
   end
 
+  it 'paces YM2612 timers at master clock divided by 144' do
+    ym2612 = MegaDrive::YM2612.new
+    ym2612.write_address_1(0x24)
+    ym2612.write_data(0xFF)
+    ym2612.write_address_1(0x25)
+    ym2612.write_data(0x03)
+    ym2612.write_address_1(0x27)
+    ym2612.write_data(0x05)
+
+    ym2612.tick(143)
+    expect(ym2612.read_register & 0x01).to eq(0)
+
+    ym2612.tick(1)
+    expect(ym2612.read_register & 0x01).to eq(0x01)
+  end
+
   it 'does not raise YM timer flags unless timer flag bits are enabled' do
     ym2612 = MegaDrive::YM2612.new
     ym2612.write_address_1(0x24)
@@ -248,6 +264,29 @@ RSpec.describe 'Mega Drive audio' do
 
     expect(emulator.psg).to be_a(MegaDrive::Audio)
     expect(emulator.psg).to respond_to(:render_frame_samples)
+  end
+
+  it 'uses exact PSG clock cycles for Mega Drive audio pacing' do
+    emulator = MegaDrive::Emulator.new
+
+    expect(emulator.audio_frame_cycles).to be_within(0.0001).of(MegaDrive::PSG::CLOCK / 60.0)
+    expect(emulator.psg.frame_cycles).to be_within(0.0001).of(MegaDrive::PSG::CLOCK / 60.0)
+
+    emulator.configure_region(timing: :pal, region: :eu)
+
+    expect(emulator.audio_frame_cycles).to be_within(0.0001).of(MegaDrive::PSG::CLOCK / 50.0)
+    expect(emulator.psg.frame_cycles).to be_within(0.0001).of(MegaDrive::PSG::CLOCK / 50.0)
+  end
+
+  it 'softens Mega Drive PSG edges with a cheap one-pole filter' do
+    audio = MegaDrive::Audio.new(MegaDrive::PSG.new, MegaDrive::YM2612.new)
+    samples = [0.0, 1.0, 1.0, 1.0]
+
+    audio.filter_psg_samples!(samples)
+
+    expect(samples[1]).to be_between(0.0, 1.0).exclusive
+    expect(samples[2]).to be > samples[1]
+    expect(samples[3]).to be > samples[2]
   end
 
   it 'grants the Z80 bus immediately for 68k-side boot code' do
@@ -779,7 +818,7 @@ RSpec.describe 'Mega Drive audio' do
     emulator.load_rom_data(rom, info: AstralVerse::RomDetector.detect(rom, path: 'sonic3.md'))
 
     expect(emulator.frame_rate).to eq(50.0)
-    expect(emulator.frame_cycles).to eq(MegaDrive::Emulator::LINE_Z80_CYCLES * MegaDrive::Emulator::PAL_LINES_PER_FRAME)
+    expect(emulator.frame_cycles).to be_within(0.0001).of(MegaDrive::Emulator::Z80_CLOCK / 50.0)
     expect(emulator.bus.read_byte(0xA10001)).to eq(0xE0)
   end
 

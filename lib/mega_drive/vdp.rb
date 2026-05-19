@@ -446,13 +446,17 @@ module MegaDrive
     end
 
     def fast_scroll_renderer?
-      !@window_enabled_cache &&
+      (!@window_enabled_cache || fast_window_overlay?) &&
         @source_x_cache&.length == @screen_width &&
         @source_y_cache&.length == @screen_height &&
         @source_x_cache[0] == 0 &&
         @source_x_cache[-1] == @screen_width - 1 &&
         @source_y_cache[0] == 0 &&
         @source_y_cache[-1] == @screen_height - 1
+    end
+
+    def fast_window_overlay?
+      @window_enabled_cache && @window_pixel_count_cache <= (@screen_width * @screen_height / 2)
     end
 
     def draw_scroll_planes_fast
@@ -601,8 +605,30 @@ module MegaDrive
         screen_y += 1
       end
 
+      draw_window_over_scroll_fast(framebuffer, backdrop) if @window_enabled_cache
       draw_sprites_over_scroll_fast(framebuffer)
       drew
+    end
+
+    def draw_window_over_scroll_fast(framebuffer, backdrop)
+      width = @screen_width
+      height = @screen_height
+      screen_y = 0
+      while screen_y < height
+        range = @window_range_cache[screen_y]
+        if range && range[1] > range[0]
+          row_offset = screen_y * width
+          screen_x = range[0]
+          while screen_x < range[1]
+            scroll_b = plane_pixel(:b, screen_x, screen_y)
+            scroll_a = window_pixel(screen_x, screen_y)
+            pixel = resolve_pixel(nil, scroll_a, scroll_b)
+            framebuffer[row_offset + screen_x] = pixel ? (pixel & 0x3F) : backdrop
+            screen_x += 1
+          end
+        end
+        screen_y += 1
+      end
     end
 
     def draw_sprites_over_scroll_fast(framebuffer)
@@ -894,6 +920,7 @@ module MegaDrive
       @v_scroll_b_single_cache = single_value(@v_scroll_b_cache)
       @window_range_cache = Array.new(height) { |y| window_range(y) }
       @window_enabled_cache = @window_range_cache.any? { |range| range && range[1] > range[0] }
+      @window_pixel_count_cache = @window_range_cache.sum { |range| range && range[1] > range[0] ? range[1] - range[0] : 0 }
       unless @pattern_row_cache_packed && @pattern_row_cache&.length == 0x800 * 8
         @pattern_row_cache = Array.new(0x800 * 8)
         @pattern_row_cache_packed = true

@@ -10,7 +10,7 @@ module AstralVerse
     TONE_GAIN = 0.16
     NOISE_GAIN = 0.025
     STREAM_GAIN = 0.38
-    AUDIO_OVERSUPPLY = ENV.fetch('ASTRAL_AUDIO_OVERSUPPLY', '1.0005').to_f
+    AUDIO_OVERSUPPLY = ENV.fetch('ASTRAL_AUDIO_OVERSUPPLY', '1.0').to_f
     PIPE_PREBUFFER_CHUNKS = ENV.fetch('ASTRAL_AUDIO_PREBUFFER_CHUNKS', '4').to_i.clamp(0, 12)
     ASYNC_AUDIO = ENV.fetch('ASTRAL_ASYNC_AUDIO', '0') == '1'
     MAX_ASYNC_JOBS = ENV.fetch('ASTRAL_AUDIO_MAX_JOBS', '8').to_i.clamp(2, 24)
@@ -170,11 +170,15 @@ module AstralVerse
     end
 
     def samples_for_frame
-      frame_samples = SAMPLE_RATE * audio_frame_cycles / @psg.class::CLOCK
+      frame_samples = SAMPLE_RATE * audio_frame_cycles / audio_clock
       @sample_credit += frame_samples * AUDIO_OVERSUPPLY
       count = @sample_credit.floor
       @sample_credit -= count
       count
+    end
+
+    def audio_clock
+      @psg.respond_to?(:clock) ? @psg.clock : @psg.class::CLOCK
     end
 
     def audio_frame_cycles

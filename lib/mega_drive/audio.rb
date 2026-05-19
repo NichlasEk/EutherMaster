@@ -4,6 +4,7 @@ module MegaDrive
     SAMPLE_RATE = 44_100
     PSG_GAIN = 0.35
     YM_GAIN = 0.75
+    PSG_FILTER_ALPHA = ENV.fetch('ASTRAL_MD_PSG_FILTER', '0.38').to_f.clamp(0.05, 1.0)
     YM_FRAME_CYCLES = 127_800.0
     YM_RENDER_RATE = ENV.fetch('ASTRAL_MD_YM_RATE', '22050').to_i.clamp(11_025, SAMPLE_RATE)
 
@@ -14,6 +15,7 @@ module MegaDrive
       @ym2612 = ym2612
       @frame_cycles = MegaDrive::PSG::CLOCK / 60.0
       @ym_frame_cycles = YM_FRAME_CYCLES
+      @psg_filter_state = 0.0
     end
 
     def begin_frame
@@ -23,6 +25,7 @@ module MegaDrive
 
     def render_frame_samples(count, frame_cycles, sample_rate = SAMPLE_RATE)
       psg_samples = @psg.render_frame_samples(count, frame_cycles, sample_rate)
+      filter_psg_samples!(psg_samples)
       ym_samples = render_ym_samples(count, sample_rate)
 
       Array.new(count) do |index|
@@ -49,12 +52,30 @@ module MegaDrive
       count = job[:count]
       sample_rate = job[:sample_rate] || SAMPLE_RATE
       psg_samples = @psg.render_frame_job(job[:psg], count, job[:frame_cycles], sample_rate)
+      filter_psg_samples!(psg_samples)
       ym_samples = render_ym_job_samples(job[:ym2612], count, sample_rate)
 
       Array.new(count) do |index|
         psg = psg_samples[index].to_f
         ((ym_samples[index] * YM_GAIN) + (psg * PSG_GAIN)).clamp(-1.0, 1.0)
       end
+    end
+
+    def filter_psg_samples!(samples)
+      state = @psg_filter_state || 0.0
+      alpha = PSG_FILTER_ALPHA
+      index = 0
+      while index < samples.length
+        state += (samples[index].to_f - state) * alpha
+        samples[index] = state
+        index += 1
+      end
+      @psg_filter_state = state
+      samples
+    end
+
+    def clock
+      CLOCK
     end
 
     private
@@ -94,8 +115,5 @@ module MegaDrive
       output
     end
 
-    def clock
-      CLOCK
-    end
   end
 end
