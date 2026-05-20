@@ -90,6 +90,7 @@ module MegaDrive
       return service_interrupt(level) if level.positive? && level > @interrupt_priority_mask
       return finish(4) if @stopped
 
+      @bus.trace_pc = @pc if @bus.respond_to?(:trace_sram_enabled?) && @bus.trace_sram_enabled?
       opcode = fetch_word
       execute_opcode(opcode)
     end

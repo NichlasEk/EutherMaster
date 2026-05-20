@@ -28,7 +28,8 @@ module MegaDrive
     Z80_TO_M68K_CYCLE_RATIO = 7_670_454.0 / 3_579_545.0
     M68K_TO_Z80_CYCLE_RATIO = 3_579_545.0 / 7_670_454.0
 
-    attr_accessor :psg, :ym2612, :vdp, :controller, :controller_b, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
+    attr_accessor :psg, :ym2612, :vdp, :controller, :controller_b, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register, :trace_pc
+    attr_reader :sram_path
 
     def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, controller_b: nil, z80_bus: nil, z80_cpu: nil)
       @memory = Array.new(size, 0)
@@ -47,6 +48,9 @@ module MegaDrive
       @frame_cycle = 0
       @ym_frame_cycle = 0
       @version_register = 0xA0
+      @trace_sram = ENV['ASTRAL_TRACE_SRAM'] == '1'
+      @trace_md_ram = ENV['ASTRAL_TRACE_MD_RAM'] == '1'
+      reset_sram
     end
 
     def load(address, bytes)
@@ -56,6 +60,33 @@ module MegaDrive
     def load_rom(bytes)
       @rom = bytes.map { |byte| byte & 0xFF }.freeze
       @rom = nil if @rom.empty?
+      reset_sram
+    end
+
+    def configure_sram(rom_bytes, rom_path: nil)
+      reset_sram
+      @sram_rom_path = rom_path
+      @sram_rom_limit = self.class.declared_rom_limit(rom_bytes) || @rom&.length
+      info = self.class.parse_sram_header(rom_bytes)
+      trace_sram("configure path=#{rom_path.inspect} header=#{info.inspect}")
+      unless info
+        configure_default_sram
+        @sram_enabled = initial_sram_enabled?(start: @sram_start, eeprom: false)
+        trace_sram("configured default start=#{hex24(@sram_start)} end=#{hex24(@sram_end)} access=#{@sram_access} enabled=#{@sram_enabled} path=#{@sram_path.inspect}")
+        return
+      end
+
+      allocate_sram(info)
+      @sram_enabled = initial_sram_enabled?(info)
+      trace_sram("configured start=#{hex24(@sram_start)} end=#{hex24(@sram_end)} access=#{@sram_access} enabled=#{@sram_enabled} path=#{@sram_path.inspect}")
+    end
+
+    def flush_sram
+      return unless @sram_dirty && @sram && @sram_path
+
+      File.binwrite(@sram_path, @sram.pack('C*'))
+      trace_sram("flush path=#{@sram_path.inspect} bytes=#{@sram.length}")
+      @sram_dirty = false
     end
 
     def read_byte(address)
@@ -72,10 +103,18 @@ module MegaDrive
       return @controller ? @controller.read_control : 0x00 if io_pair?(address, IO_PORT_1_CONTROL_BASE)
       return @controller_b ? @controller_b.read_control : 0x00 if io_pair?(address, IO_PORT_2_CONTROL_BASE)
       return 0x00 if io_pair?(address, IO_EXPANSION_CONTROL_BASE)
+      return sram_lock_read_byte if sram_lock_address?(address)
+      trace_sram("read8 ctrl #{hex24(address)} -> open") if sram_control_range?(address)
       return z80_bus_request_status if z80_bus_request_address?(address)
       return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
       return read_z80_ram(address) if z80_ram_mirror_address?(address)
-      return @work_ram[address & WORK_RAM_MASK] if work_ram_address?(address)
+      return read_sram_byte(address) if sram_address?(address)
+      trace_sram("read8 default-sram-window #{hex24(address)} mapped=#{@sram_enabled}") if default_sram_window?(address)
+      if work_ram_address?(address)
+        value = @work_ram[address & WORK_RAM_MASK]
+        trace_sram("read8 ram #{hex24(address)} -> #{hex8(value)}") if trace_ram_address?(address)
+        return value
+      end
       return @rom[address % @rom.length] if cartridge_rom_address?(address)
 
       @memory[address] & 0xFF
@@ -87,7 +126,19 @@ module MegaDrive
       return @vdp.read_control if vdp_control_address?(address)
       return @vdp.read_hv_counter if vdp_hv_counter_address?(address)
       return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
-      return read_work_ram_word(address) if work_ram_address?(address)
+      if sram_lock_span_address?(address, 2)
+        value = @sram_enabled ? 0x0101 : 0x0000
+        trace_sram("read16 lock #{hex24(address)} -> #{hex16(value)}")
+        return value
+      end
+      trace_sram("read16 ctrl #{hex24(address)} -> open") if sram_control_range?(address)
+      return ((read_byte(address) << 8) | read_byte(address + 1)) & 0xFFFF if sram_address?(address)
+      trace_sram("read16 default-sram-window #{hex24(address)} mapped=#{@sram_enabled}") if default_sram_window?(address)
+      if work_ram_address?(address)
+        value = read_work_ram_word(address)
+        trace_sram("read16 ram #{hex24(address)} -> #{hex16(value)}") if trace_ram_address?(address)
+        return value
+      end
       return read_rom_word(address) if cartridge_rom_address?(address)
       return read_byte(address) if io_address?(address)
 
@@ -95,6 +146,14 @@ module MegaDrive
     end
 
     def read_long(address)
+      address &= ADDRESS_MASK
+      if sram_lock_span_address?(address, 4)
+        value = @sram_enabled ? 0x0101_0101 : 0x0000_0000
+        trace_sram("read32 lock #{hex24(address)} -> #{hex32(value)}")
+        return value
+      end
+      trace_sram("read32 ctrl #{hex24(address)} -> open") if sram_control_range?(address)
+
       ((read_word(address) << 16) | read_word(address + 2)) & 0xFFFF_FFFF
     end
 
@@ -119,6 +178,11 @@ module MegaDrive
         @controller_b&.write_control(value)
       elsif io_pair?(address, IO_EXPANSION_DATA_BASE) || io_pair?(address, IO_EXPANSION_CONTROL_BASE)
         # No expansion device is attached. Writes are accepted but do not affect reads.
+      elsif sram_lock_address?(address)
+        trace_sram("write8 lock #{hex24(address)} <= #{hex8(value)}")
+        set_sram_enabled((value & 0x01) != 0)
+      elsif sram_control_range?(address)
+        trace_sram("write8 ctrl #{hex24(address)} <= #{hex8(value)} ignored")
       elsif z80_bus_request_address?(address)
         @z80_bus_requested = (value & 0x01) != 0
       elsif z80_reset_address?(address)
@@ -131,9 +195,14 @@ module MegaDrive
         write_z80_ram(address, value)
       elsif z80_bank_register_address?(address)
         @z80_bus&.write_byte(0x6000, value)
+      elsif sram_address?(address)
+        write_sram_byte(address, value)
+      elsif default_sram_window?(address)
+        trace_sram("write8 default-sram-window #{hex24(address)} <= #{hex8(value)} mapped=#{@sram_enabled}")
       elsif psg_address?(address)
         @psg.write(value, port: address & 0x1F, cycle: @frame_cycle)
       elsif work_ram_address?(address)
+        trace_sram("write8 ram #{hex24(address)} <= #{hex8(value)}") if trace_ram_address?(address)
         @work_ram[address & WORK_RAM_MASK] = value
       else
         @memory[address] = value
@@ -149,11 +218,20 @@ module MegaDrive
       elsif vdp_control_address?(address)
         @vdp.write_control(value)
         return
+      elsif sram_lock_span_address?(address, 2)
+        trace_sram("write16 lock #{hex24(address)} <= #{hex16(value)}")
+        set_sram_enabled((value & 0x01) != 0)
+        return
+      elsif sram_control_range?(address)
+        trace_sram("write16 ctrl #{hex24(address)} <= #{hex16(value)} ignored")
+      elsif default_sram_window?(address)
+        trace_sram("write16 default-sram-window #{hex24(address)} <= #{hex16(value)} mapped=#{@sram_enabled}")
       elsif z80_ram_mirror_address?(address)
         write_z80_ram(address, (value >> 8) & 0xFF)
         return
       elsif work_ram_address?(address)
         offset = address & WORK_RAM_MASK
+        trace_sram("write16 ram #{hex24(address)} <= #{hex16(value)}") if trace_ram_address?(address)
         @work_ram[offset] = (value >> 8) & 0xFF
         @work_ram[(offset + 1) & WORK_RAM_MASK] = value & 0xFF
         return
@@ -164,6 +242,13 @@ module MegaDrive
     end
 
     def write_long(address, value)
+      if sram_lock_span_address?(address & ADDRESS_MASK, 4)
+        trace_sram("write32 lock #{hex24(address)} <= #{hex32(value)}")
+        set_sram_enabled((value & 0x01) != 0)
+        return
+      end
+      trace_sram("write32 ctrl #{hex24(address)} <= #{hex32(value)} ignored") if sram_control_range?(address & ADDRESS_MASK)
+
       write_word(address, (value >> 16) & 0xFFFF)
       write_word(address + 2, value & 0xFFFF)
     end
@@ -249,6 +334,40 @@ module MegaDrive
       @rom && address < 0x00A0_0000
     end
 
+    def sram_lock_address?(address)
+      address == 0x00A1_30F1
+    end
+
+    def sram_lock_span_address?(address, bytes)
+      address <= 0x00A1_30F1 && ((address + bytes - 1) & ADDRESS_MASK) >= 0x00A1_30F1
+    end
+
+    def sram_control_range?(address)
+      (address & 0x00FF_FF00) == 0x00A1_3000
+    end
+
+    def sram_lock_read_byte
+      value = @sram_enabled ? 0x01 : 0x00
+      trace_sram("read8 lock -> #{hex8(value)}")
+      value
+    end
+
+    def set_sram_enabled(enabled)
+      configure_default_sram unless @sram
+      previous = @sram_enabled
+      @sram_enabled = enabled
+      trace_sram("lock #{previous} -> #{@sram_enabled} configured=#{!@sram.nil?} path=#{@sram_path.inspect}")
+      flush_sram if previous && !enabled
+    end
+
+    def sram_address?(address)
+      @sram && @sram_enabled && address >= @sram_start && address <= @sram_end
+    end
+
+    def default_sram_window?(address)
+      @trace_sram && address >= 0x20_0000 && address <= 0x20_FFFF
+    end
+
     def work_ram_address?(address)
       address >= WORK_RAM_BASE
     end
@@ -292,6 +411,172 @@ module MegaDrive
 
     def write_z80_ram(address, value)
       @z80_bus.write_byte(address & 0x1FFF, value)
+    end
+
+    def reset_sram
+      @sram = nil
+      @sram_start = 0
+      @sram_end = 0
+      @sram_access = :word
+      @sram_enabled = false
+      @sram_dirty = false
+      @sram_path = nil
+      @sram_rom_path = nil
+    end
+
+    def configure_default_sram
+      @sram_rom_path ||= @rom_path if defined?(@rom_path)
+      allocate_sram(start: 0x20_0001, end: 0x20_FFFF, access: :word, eeprom: false)
+      trace_sram("default start=#{hex24(@sram_start)} end=#{hex24(@sram_end)} path=#{@sram_path.inspect}")
+    end
+
+    def allocate_sram(info)
+      @sram_start = info[:start]
+      @sram_end = info[:end]
+      @sram_access = info[:access]
+      shift = @sram_access == :word ? 0 : 1
+      size = ((@sram_end - @sram_start) >> shift) + 1
+      return if size <= 0 || size > 0x20_0000
+
+      @sram = Array.new(size, 0xFF)
+      @sram_path = @sram_rom_path && !@sram_rom_path.empty? ? File.join(File.dirname(@sram_rom_path), "#{File.basename(@sram_rom_path, '.*')}.srm") : nil
+      load_sram_file
+    end
+
+    def initial_sram_enabled?(info)
+      return true if info[:eeprom]
+      return false unless @rom
+
+      rom_limit = @sram_rom_limit || @rom.length
+      info[:start] >= rom_limit
+    end
+
+    def read_sram_byte(address)
+      index = sram_index(address)
+      unless index && index >= 0 && index < @sram.length
+        trace_sram("read8 sram #{hex24(address)} invalid index=#{index.inspect}")
+        return 0xFF
+      end
+
+      value = @sram[index] & 0xFF
+      trace_sram("read8 sram #{hex24(address)}[#{hex(index)}] -> #{hex8(value)}")
+      value
+    end
+
+    def write_sram_byte(address, value)
+      index = sram_index(address)
+      unless index && index >= 0 && index < @sram.length
+        trace_sram("write8 sram #{hex24(address)} invalid index=#{index.inspect} <= #{hex8(value)}")
+        return
+      end
+      return if @sram[index] == value
+
+      @sram[index] = value
+      @sram_dirty = true
+      trace_sram("write8 sram #{hex24(address)}[#{hex(index)}] <= #{hex8(value)}")
+    end
+
+    def sram_index(address)
+      case @sram_access
+      when :word
+        address - @sram_start
+      when :byte_even
+        return nil unless address.even?
+
+        (address - @sram_start) >> 1
+      else
+        return nil if address.even?
+
+        (address - @sram_start) >> 1
+      end
+    end
+
+    def load_sram_file
+      return unless @sram_path && File.exist?(@sram_path)
+
+      bytes = File.binread(@sram_path).bytes
+      bytes.first(@sram.length).each_with_index { |byte, index| @sram[index] = byte & 0xFF }
+      @sram_dirty = false
+    rescue SystemCallError
+      @sram_dirty = false
+    end
+
+    def self.parse_sram_header(bytes)
+      return nil unless bytes && bytes.length >= 0x1BC
+      return nil unless bytes[0x1B0] == 'R'.ord && bytes[0x1B1] == 'A'.ord
+
+      type = bytes[0x1B2].to_i
+      flags = bytes[0x1B3].to_i
+      eeprom = type == 0xE8 && flags == 0x40
+      access = case type
+               when 0xA0, 0xE0 then :word
+               when 0xB0, 0xF0 then :byte_even
+               when 0xB8, 0xF8 then :byte_odd
+               when 0xE8 then :word
+               else
+                 return nil
+               end
+      battery = [0xE0, 0xF0, 0xF8].include?(type)
+      return nil unless battery || eeprom
+
+      start = read_header_long(bytes, 0x1B4)
+      finish = read_header_long(bytes, 0x1B8)
+      if eeprom && (finish < start || start < 0x20_0000 || finish > 0x3F_FFFF)
+        start = 0x20_0001
+        finish = 0x20_FFFF
+      end
+      return nil if finish < start || start < 0x20_0000 || finish > 0x3F_FFFF
+
+      { start: start, end: finish, access: access, eeprom: eeprom }
+    end
+
+    def self.read_header_long(bytes, offset)
+      ((bytes[offset].to_i << 24) |
+        (bytes[offset + 1].to_i << 16) |
+        (bytes[offset + 2].to_i << 8) |
+        bytes[offset + 3].to_i) & 0xFFFF_FFFF
+    end
+
+    def self.declared_rom_limit(bytes)
+      return nil unless bytes && bytes.length >= 0x1A8
+
+      start = read_header_long(bytes, 0x1A0)
+      finish = read_header_long(bytes, 0x1A4)
+      return nil unless start.zero? && finish.positive? && finish < 0xA0_0000
+
+      finish + 1
+    end
+
+    def trace_sram(message)
+      return unless @trace_sram
+      @trace_sram_count ||= 0
+      return if @trace_sram_count >= 100_000
+      @trace_sram_count += 1
+
+      @trace_sram_io ||= begin
+        Dir.mkdir('logs') unless Dir.exist?('logs')
+        File.open('logs/md_sram_trace.log', 'w')
+      end
+      pc = @trace_pc ? " pc=#{hex24(@trace_pc)}" : ''
+      @trace_sram_io.puts("[#{Process.clock_gettime(Process::CLOCK_MONOTONIC).round(6)}]#{pc} #{message}")
+      @trace_sram_io.flush
+    rescue SystemCallError
+      @trace_sram = false
+    end
+
+    def trace_sram_enabled? = @trace_sram
+
+    def hex8(value) = "0x%02X" % (value & 0xFF)
+    def hex16(value) = "0x%04X" % (value & 0xFFFF)
+    def hex24(value) = "0x%06X" % (value & ADDRESS_MASK)
+    def hex32(value) = "0x%08X" % (value & 0xFFFF_FFFF)
+    def hex(value) = "0x%X" % value
+
+    def trace_ram_address?(address)
+      return false unless @trace_sram && @trace_md_ram
+
+      logical = address & ADDRESS_MASK
+      logical <= 0x00FF_0040 || (logical >= 0x00FF_3900 && logical <= 0x00FF_4700)
     end
 
     def vdp_data_address?(address)

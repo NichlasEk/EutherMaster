@@ -34,10 +34,11 @@ module MegaDrive
     end
 
     def load_rom(path, info: nil)
-      load_rom_data(File.binread(path).bytes, info: info)
+      load_rom_data(File.binread(path).bytes, info: info, path: path)
     end
 
-    def load_rom_data(data, info: nil)
+    def load_rom_data(data, info: nil, path: nil)
+      @bus&.flush_sram
       @rom_info = info
       rom_bytes = normalized_rom_bytes(data, info)
       @detected_region_mode, @detected_timing_mode = detect_header_region_modes(rom_bytes, nil)
@@ -47,6 +48,7 @@ module MegaDrive
       @controller_b = Controller.new
       build_buses
       @bus.load_rom(rom_bytes)
+      @bus.configure_sram(rom_bytes, rom_path: path || info&.path)
       apply_region_configuration
       @cpu = M68K.new(@bus)
       @rom_loaded = true
@@ -55,6 +57,7 @@ module MegaDrive
     end
 
     def reset
+      @bus.flush_sram
       @sms_psg.reset
       @ym2612.reset
       @z80_bus.reset
@@ -154,6 +157,7 @@ module MegaDrive
       frame_finished = monotonic_time
       @frame_count += 1
       @render_version += 1
+      @bus.flush_sram
       record_perf(cpu_finished - started, frame_finished - cpu_finished, frame_finished - started, steps)
     end
 

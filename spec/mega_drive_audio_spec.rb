@@ -1,4 +1,5 @@
 require 'spec_helper'
+require 'tmpdir'
 
 RSpec.describe 'Mega Drive audio' do
   it 'routes YM2612 port writes through the 68k bus' do
@@ -814,6 +815,114 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_word(0)).to eq(0x1234)
     expect(bus.read_word(0x80000)).to eq(0x1234)
     expect(bus.read_word(0x9FFFFE)).to eq(0x5678)
+  end
+
+  it 'maps battery backed SRAM from the Mega Drive header and saves beside the ROM' do
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'savegame.md')
+      rom = Array.new(0x200, 0)
+      rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+      rom[0x100, 4] = 'SEGA'.bytes
+      rom[0x1B0, 12] = ['R'.ord, 'A'.ord, 0xF8, 0x20, 0x00, 0x20, 0x00, 0x01, 0x00, 0x20, 0x00, 0x0F]
+      File.binwrite(rom_path, rom.pack('C*'))
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+
+      expect(File.exist?(File.join(dir, 'savegame.srm'))).to be(false)
+      emulator.bus.write_byte(0xA130F1, 0x01)
+      emulator.bus.write_byte(0x200001, 0x42)
+      emulator.bus.flush_sram
+
+      expect(File.binread(File.join(dir, 'savegame.srm')).bytes.first).to eq(0x42)
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+      emulator.bus.write_byte(0xA130F1, 0x01)
+
+      expect(emulator.bus.read_byte(0x200001)).to eq(0x42)
+      expect(emulator.bus.read_byte(0x200002)).to eq(0xFF)
+    end
+  end
+
+  it 'backs Mega Drive EEPROM headers with persistent cart memory' do
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'eeprom.md')
+      rom = Array.new(0x200, 0)
+      rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+      rom[0x100, 4] = 'SEGA'.bytes
+      rom[0x1B0, 4] = ['R'.ord, 'A'.ord, 0xE8, 0x40]
+      File.binwrite(rom_path, rom.pack('C*'))
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+      emulator.bus.write_byte(0x200001, 0x7A)
+      emulator.bus.flush_sram
+
+      expect(File.binread(File.join(dir, 'eeprom.srm')).bytes.first).to eq(0x7A)
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+
+      expect(emulator.bus.read_byte(0x200001)).to eq(0x7A)
+    end
+  end
+
+  it 'loads default SRAM for headerless games and maps it when the SRAM latch is enabled' do
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'headerless-save.md')
+      rom = Array.new(0x400, 0)
+      rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+      rom[0x100, 4] = 'SEGA'.bytes
+      rom[0x1A4, 4] = [0x00, 0x1F, 0xFF, 0xFF]
+      File.binwrite(rom_path, rom.pack('C*'))
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+      expect(emulator.bus.sram_path).to eq(File.join(dir, 'headerless-save.srm'))
+
+      emulator.bus.write_byte(0x200001, 0x99)
+      emulator.bus.flush_sram
+
+      save_path = File.join(dir, 'headerless-save.srm')
+      expect(File.binread(save_path).bytes.first).to eq(0x99)
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+
+      expect(emulator.bus.read_byte(0x200001)).to eq(0x99)
+    end
+  end
+
+  it 'does not create an SRAM file for headerless games until SRAM is written' do
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'headerless-clean.md')
+      rom = Array.new(0x200, 0)
+      rom[0, 8] = [0x00, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00]
+      rom[0x100, 4] = 'SEGA'.bytes
+      File.binwrite(rom_path, rom.pack('C*'))
+
+      emulator = MegaDrive::Emulator.new
+      emulator.load_rom(rom_path, info: AstralVerse::RomDetector.detect(rom, path: rom_path))
+      emulator.bus.flush_sram
+
+      expect(File.exist?(File.join(dir, 'headerless-clean.srm'))).to be(false)
+    end
+  end
+
+  it 'handles SRAM latch accesses through 16-bit and 32-bit bus operations' do
+    bus = MegaDrive::M68KBus.new
+    bus.load_rom(Array.new(0x200, 0))
+
+    expect(bus.read_word(0xA130F0)).to eq(0x0000)
+    bus.write_word(0xA130F0, 0x0001)
+
+    expect(bus.read_byte(0xA130F1)).to eq(0x01)
+    expect(bus.read_word(0xA130F0)).to eq(0x0101)
+    expect(bus.read_long(0xA130EE)).to eq(0x0101_0101)
+
+    bus.write_long(0xA130EE, 0x0000_0000)
+    expect(bus.read_word(0xA130F0)).to eq(0x0000)
   end
 
   it 'mirrors the 68k work RAM across the E00000-FFFFFF range' do
