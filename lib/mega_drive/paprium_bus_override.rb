@@ -100,6 +100,7 @@ module MegaDrive
       @nvram = Array.new(NVRAM_WORDS, 0)
       @vram_slots = Array.new(MAX_VRAM_SLOTS) { new_vram_slot }
       @object_handles = Array.new(OBJECTS_COUNT) { new_object_handle }
+      @sfx_voices = Array.new(8) { new_sfx_voice }
       @draw_list = Array.new(OBJECTS_COUNT, 0)
       @save_path = build_save_path(source_path)
       @source_path = source_path
@@ -161,11 +162,13 @@ module MegaDrive
         bgm_tracks_base_addr: @bgm_tracks_base_addr,
         bgm_unpack_addr: @bgm_unpack_addr,
         sfx_base_addr: @sfx_base_addr,
+        sfx_voices: @sfx_voices,
         gfx_blocks_base_addr: @gfx_blocks_base_addr,
         decoded: @decoded,
         save_path: @save_path,
         source_path: @source_path,
         audio_bgm_volume: @audio_bgm_volume,
+        audio_sfx_volume: @audio_sfx_volume,
         audio_config: @audio_config
       }
     end
@@ -179,6 +182,8 @@ module MegaDrive
       @requested_music_track = 0
       @music_loading = false
       @music_generation = 0
+      @sfx_voices ||= Array.new(8) { new_sfx_voice }
+      @audio_sfx_volume ||= 0x100
     end
 
     def read_byte(address)
@@ -251,6 +256,7 @@ module MegaDrive
     def reset_runtime_state
       @vram_slots = Array.new(MAX_VRAM_SLOTS) { new_vram_slot }
       @object_handles = Array.new(OBJECTS_COUNT) { new_object_handle }
+      @sfx_voices = Array.new(8) { new_sfx_voice }
       @draw_list.fill(0)
       @draw_list_count = 0
       @sdram_pointer_word = 0
@@ -272,18 +278,23 @@ module MegaDrive
         @music_loading = false
         @music_generation = @music_generation.to_i + 1
         @audio_bgm_volume = 0x100
+        @audio_sfx_volume = 0x100
         @audio_config = 0
+        @sfx_voices.each { |voice| voice.replace(new_sfx_voice) }
       end
     end
 
     def mix_decoded_music_into_locked(samples, count, sample_rate)
-      return false if @music_pcm_data.nil? || @music_pcm_data.empty? || @requested_music_track.to_i.zero?
+      mixed = false
+      if @music_pcm_data.nil? || @music_pcm_data.empty? || @requested_music_track.to_i.zero?
+        return mix_sfx_into_locked(samples, count)
+      end
 
       frames = @music_pcm_data.bytesize / 2
-      return false if frames <= 0
+      return mix_sfx_into_locked(samples, count) if frames <= 0
 
       volume = ((@audio_bgm_volume.to_i / 256.0) * MUSIC_GAIN).clamp(0.0, 1.5)
-      return false if volume <= 0.0
+      return mix_sfx_into_locked(samples, count) if volume <= 0.0
 
       step = sample_rate == AUDIO_SAMPLE_RATE ? 1.0 : AUDIO_SAMPLE_RATE.to_f / sample_rate.to_f
       position = @music_sample_position.to_f
@@ -300,7 +311,81 @@ module MegaDrive
         index += 1
       end
       @music_sample_position = position % frames
-      true
+      mixed = true
+      mix_sfx_into_locked(samples, count) || mixed
+    end
+
+    def mix_sfx_into_locked(samples, count)
+      return false if @sfx_base_addr.to_i.zero? || @sfx_voices.nil? || @sfx_voices.empty?
+
+      global_volume = @audio_sfx_volume.to_i
+      return false if global_volume <= 0
+
+      mixed = false
+      frame = 0
+      while frame < count
+        mix = 0
+        @sfx_voices.each do |voice|
+          next if voice[:size].to_i <= 0
+
+          depth = voice[:type].to_i & 0x03
+          unless depth == 1 || depth == 2
+            voice[:size] = 0
+            next
+          end
+
+          sample = rom_raw_byte(@sfx_base_addr + (voice[:ptr].to_i ^ 1))
+          if depth == 1
+            sample = (sample * 65_536 / 256) - 32_768
+          else
+            sample >>= 4 if voice[:count].to_i.zero?
+            sample = ((sample & 0x0F) * 65_536 / 16) - 32_768
+          end
+
+          sample = sample * voice[:volume].to_i / 0x400
+          pan = voice[:panning].to_i
+          sample_l = sample * (pan <= 0x80 ? 0x80 : 0x100 - pan) / 0x80
+          sample_r = sample * (pan >= 0x80 ? 0x80 : pan) / 0x80
+          sample = (sample_l + sample_r) / 2
+          sample = sample * 125 / 100 if (voice[:flags].to_i & 0x100) != 0
+          mix += sample
+
+          advance_sfx_voice!(voice, depth)
+        end
+
+        if mix != 0
+          mix *= 2 if (@audio_config.to_i & 0x08) != 0
+          mix = mix * global_volume / 0x100
+          samples[frame] = (samples[frame].to_f + (mix / 32768.0)).clamp(-1.0, 1.0)
+          mixed = true
+        end
+        frame += 1
+      end
+      mixed
+    end
+
+    def advance_sfx_voice!(voice, depth)
+      voice[:time] = voice[:time].to_i + 1
+      tick = voice[:tick].to_i + 0x10000
+      tick -= 0x800 if (voice[:flags].to_i & 0x8000) != 0
+      tick -= 0x8000 if (voice[:flags].to_i & 0x2000) != 0
+
+      rate = sfx_rate_step(voice[:type].to_i)
+      if tick >= rate
+        tick -= rate
+        voice[:count] = voice[:count].to_i + 1
+        voice[:size] = voice[:size].to_i - 1
+        if voice[:count] >= depth
+          voice[:ptr] = voice[:ptr].to_i + 1
+          voice[:count] = 0
+        end
+      end
+
+      voice[:tick] = tick
+      return unless voice[:size].to_i <= 0
+
+      voice[:count] = 0
+      restart_looping_sfx!(voice) if voice[:loop]
     end
 
     def new_vram_slot
@@ -309,6 +394,11 @@ module MegaDrive
 
     def new_object_handle
       { anim_offset: 0, current_anim: 0, counter: 0 }
+    end
+
+    def new_sfx_voice
+      { num: 0, ptr: 0, start: 0, size: 0, type: 0, volume: 0, panning: 0x80,
+        flags: 0, time: 0, tick: 0, count: 0, decay: 0, loop: false }
     end
 
     def read_paprium_register_word(offset)
@@ -376,6 +466,14 @@ module MegaDrive
         )
       when 0xC9
         @music_mutex.synchronize { @audio_bgm_volume = arg & 0xFF }
+      when 0xCA
+        @music_mutex.synchronize { @audio_sfx_volume = arg & 0xFF }
+      when 0xD1
+        play_sfx(arg)
+      when 0xD2
+        stop_sfx(arg)
+      when 0xD3
+        loop_sfx(arg)
       when 0xDA
         source = ((get_command_arg(1) << 16) | get_command_arg(2)) & 0xFFFF_FFFF
         dest = get_command_arg(0)
@@ -453,19 +551,125 @@ module MegaDrive
     def decode_music_file(source_path, file_name)
       local_path = find_music_file(source_path, file_name)
       if local_path
-        output, status = Open3.capture2('ffmpeg', '-v', 'error', '-i', local_path,
-                                        '-f', 's16le', '-ac', '1', '-ar', AUDIO_SAMPLE_RATE.to_s, 'pipe:1',
-                                        binmode: true)
+        output, _err, status = Open3.capture3('ffmpeg', '-v', 'quiet', '-nostdin', '-i', local_path,
+                                              '-f', 's16le', '-ac', '1', '-ar', AUDIO_SAMPLE_RATE.to_s, 'pipe:1',
+                                              binmode: true)
         return status.success? ? output.b : ''.b
       end
 
       bytes = extract_music_bytes(source_path, file_name)
       return ''.b unless bytes && !bytes.empty?
 
-      output, status = Open3.capture2('ffmpeg', '-v', 'error', '-i', 'pipe:0',
-                                      '-f', 's16le', '-ac', '1', '-ar', AUDIO_SAMPLE_RATE.to_s, 'pipe:1',
-                                      stdin_data: bytes, binmode: true)
+      output, _err, status = Open3.capture3('ffmpeg', '-v', 'quiet', '-nostdin', '-i', 'pipe:0',
+                                            '-f', 's16le', '-ac', '1', '-ar', AUDIO_SAMPLE_RATE.to_s, 'pipe:1',
+                                            stdin_data: bytes, binmode: true)
       status.success? ? output.b : ''.b
+    end
+
+    def play_sfx(sfx)
+      return if @sfx_base_addr.to_i.zero?
+
+      channel_mask = get_command_arg(0)
+      volume = get_command_arg(1)
+      panning = get_command_arg(2)
+      flags = get_command_arg(3)
+      entry = @sfx_base_addr + (sfx * 8)
+      ptr = ((read_rom_u16_raw(entry) << 16) | read_rom_u16_raw(entry + 2)) & 0xFFFF_FFFF
+      size = ((rom_raw_byte(entry + 4) << 16) | read_rom_u16_raw(entry + 6)) & 0xFFFF_FFFF
+      type = rom_raw_byte(entry + 5)
+      return if size <= 0
+
+      @music_mutex.synchronize do
+        channel = select_sfx_channel(channel_mask)
+        @sfx_voices[channel] = {
+          num: sfx & 0xFF,
+          ptr: ptr,
+          start: ptr,
+          size: size,
+          type: type,
+          volume: volume,
+          panning: panning,
+          flags: flags,
+          time: 0,
+          tick: 0,
+          count: 0,
+          decay: 0,
+          loop: false
+        }
+      end
+    end
+
+    def select_sfx_channel(channel_mask)
+      selected = 0
+      max_time = -1
+      if channel_mask.to_i.zero?
+        @sfx_voices.each_with_index do |voice, index|
+          return index if voice[:size].to_i <= 0
+
+          if voice[:time].to_i > max_time
+            max_time = voice[:time].to_i
+            selected = index
+          end
+        end
+        return selected
+      end
+
+      mask = channel_mask
+      @sfx_voices.each_with_index do |voice, index|
+        next if (mask & 1).zero?
+
+        return index if voice[:size].to_i <= 0
+        if voice[:time].to_i > max_time
+          max_time = voice[:time].to_i
+          selected = index
+        end
+        mask >>= 1
+      end
+      selected
+    end
+
+    def stop_sfx(channel_mask)
+      flags = get_command_arg(0)
+      @music_mutex.synchronize do
+        @sfx_voices.each_with_index do |voice, index|
+          next if (channel_mask & (1 << index)).zero?
+
+          voice[:size] = 0 if flags.zero?
+          voice[:decay] = flags
+          voice[:loop] = false
+          break
+        end
+      end
+    end
+
+    def loop_sfx(channel_mask)
+      volume = get_command_arg(0)
+      panning = get_command_arg(1)
+      decay = get_command_arg(2)
+      @music_mutex.synchronize do
+        @sfx_voices.each_with_index do |voice, index|
+          next if (channel_mask & (1 << index)).zero?
+
+          voice[:volume] = volume
+          voice[:panning] = panning
+          voice[:decay] = decay
+          voice[:loop] = true
+          break
+        end
+      end
+    end
+
+    def restart_looping_sfx!(voice)
+      entry = @sfx_base_addr + (voice[:num].to_i * 8)
+      voice[:ptr] = ((read_rom_u16_raw(entry) << 16) | read_rom_u16_raw(entry + 2)) & 0xFFFF_FFFF
+      voice[:size] = ((rom_raw_byte(entry + 4) << 16) | read_rom_u16_raw(entry + 6)) & 0xFFFF_FFFF
+    end
+
+    def sfx_rate_step(type)
+      rates = [1, 2, 4, 5, 8, 9]
+      index = (type >> 4) & 0x0F
+      index = rates.length - 1 if index >= rates.length
+      rates[index] << 16
     end
 
     def find_music_file(source_path, file_name)
@@ -940,6 +1144,10 @@ module MegaDrive
         (rom_raw_byte(byte_addr + 1) << 8) |
         (rom_raw_byte(byte_addr + 2) << 16) |
         (rom_raw_byte(byte_addr + 3) << 24)) & 0xFFFF_FFFF
+    end
+
+    def read_rom_u16_raw(byte_addr)
+      (rom_raw_byte(byte_addr) | (rom_raw_byte(byte_addr + 1) << 8)) & 0xFFFF
     end
 
     def get_command_arg(index)
