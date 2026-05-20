@@ -18,9 +18,9 @@ module AstralVerse
       @ancient_codex[0, size] = @relic[0, size]
     end
 
-    def inscribe_codex_from_path(path)
+    def inscribe_codex_from_path(path, essence = nil)
       @relic_path = path
-      essence = File.binread(path).bytes
+      essence ||= File.binread(path).bytes
       inscribe_codex(essence)
     end
 

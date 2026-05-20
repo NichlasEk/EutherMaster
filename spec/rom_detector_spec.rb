@@ -1,8 +1,13 @@
 require 'spec_helper'
+require 'tmpdir'
 
 RSpec.describe AstralVerse::RomDetector do
   def bytes(size)
     Array.new(size, 0)
+  end
+
+  def seven_zip_available?
+    system('7z', 'i', out: File::NULL, err: File::NULL)
   end
 
   it 'detects Mega Drive ROMs from the SEGA header' do
@@ -71,6 +76,45 @@ RSpec.describe AstralVerse::RomDetector do
     expect(described_class.detect(bytes(0x1000), path: 'homebrew.gg').system).to eq(:game_gear)
     expect(described_class.detect(bytes(0x1000), path: 'homebrew.md').system).to eq(:mega_drive)
     expect(described_class.detect(bytes(0x1000), path: 'unknown.bin')).to be_nil
+  end
+
+  it 'detects and loads ROMs from zip archives' do
+    skip '7z not installed' unless seven_zip_available?
+
+    Dir.mktmpdir do |dir|
+      rom = bytes(0x200)
+      rom[0x100, 4] = 'SEGA'.bytes
+      rom_path = File.join(dir, 'sonic.md')
+      archive_path = File.join(dir, 'sonic.zip')
+      File.binwrite(rom_path, rom.pack('C*'))
+      system('7z', 'a', '-tzip', archive_path, rom_path, out: File::NULL, err: File::NULL)
+
+      loaded = described_class.load_rom_file(archive_path)
+
+      expect(loaded[:info].system).to eq(:mega_drive)
+      expect(loaded[:info].name).to eq('sonic.md')
+      expect(loaded[:bytes][0x100, 4]).to eq('SEGA'.bytes)
+    end
+  end
+
+  it 'detects and loads ROMs from 7z archives' do
+    skip '7z not installed' unless seven_zip_available?
+
+    Dir.mktmpdir do |dir|
+      rom = bytes(0x8000)
+      rom[0x7FF0, 8] = 'TMR SEGA'.bytes
+      rom[0x7FFF] = 0x40
+      rom_path = File.join(dir, 'alex.sms')
+      archive_path = File.join(dir, 'alex.7z')
+      File.binwrite(rom_path, rom.pack('C*'))
+      system('7z', 'a', archive_path, rom_path, out: File::NULL, err: File::NULL)
+
+      loaded = described_class.load_rom_file(archive_path)
+
+      expect(loaded[:info].system).to eq(:sms)
+      expect(loaded[:info].name).to eq('alex.sms')
+      expect(loaded[:bytes][0x7FF0, 8]).to eq('TMR SEGA'.bytes)
+    end
   end
 
   it 'parses old-style Mega Drive region fields from all three bytes' do

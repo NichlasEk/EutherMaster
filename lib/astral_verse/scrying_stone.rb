@@ -26,16 +26,18 @@ module AstralVerse
     end
 
     def absorb_codex(path)
-      info = RomDetector.detect_file(path)
+      loaded = RomDetector.load_rom_file(path)
+      info = loaded&.fetch(:info)
       raise "Unsupported ROM type" unless info
 
-      @crystal_vault.inscribe_codex_from_path(path)
+      essence = loaded.fetch(:bytes)
+      @crystal_vault.inscribe_codex_from_path(path, essence)
       @rom_info = info
       @emulator = build_emulator(info)
       if info.mega_drive?
-        @emulator.load_rom(path, info: info)
+        @emulator.load_rom_data(essence, info: info, path: path)
       else
-        @emulator.load_rom(path)
+        @emulator.load_rom_data(essence)
       end
       @codex_present = true
       attune
@@ -134,7 +136,10 @@ module AstralVerse
       end
 
       relic_path = payload[:relic_path]
-      @crystal_vault.inscribe_codex_from_path(relic_path) if relic_path && File.exist?(relic_path)
+      if relic_path && File.exist?(relic_path)
+        loaded = RomDetector.load_rom_file(relic_path)
+        @crystal_vault.inscribe_codex_from_path(relic_path, loaded ? loaded[:bytes] : nil)
+      end
       @emulator = payload.fetch(:emulator)
       @emulator.rewire_after_snapshot_load if @emulator.respond_to?(:rewire_after_snapshot_load)
       @rom_info = payload[:rom_info]

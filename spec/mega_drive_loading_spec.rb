@@ -22,4 +22,22 @@ RSpec.describe 'Mega Drive ROM loading' do
     expect(stone.emulator).to be_a(MegaDrive::Emulator)
     expect(stone.emulator.cpu.pc).to eq(0x120)
   end
+
+  it 'loads Mega Drive ROMs from zip archives' do
+    skip '7z not installed' unless system('7z', 'i', out: File::NULL, err: File::NULL)
+
+    Dir.mktmpdir do |dir|
+      rom_path = File.join(dir, 'tiny.md')
+      archive_path = File.join(dir, 'tiny.zip')
+      write_md_rom(rom_path)
+      system('7z', 'a', '-tzip', archive_path, rom_path, out: File::NULL, err: File::NULL)
+
+      stone = AstralVerse::ScryingStone.new
+      stone.absorb_codex(archive_path)
+
+      expect(stone.rom_info.system).to eq(:mega_drive)
+      expect(stone.rom_info.name).to eq('tiny.md')
+      expect(stone.emulator.cpu.pc).to eq(0x120)
+    end
+  end
 end

@@ -1,12 +1,15 @@
 module AstralVerse
   module RomDetector
+    require 'open3'
+
     HEADER_READ_SIZE = 0x8200
     SMS_SIGNATURE = 'TMR SEGA'.bytes.freeze
     SMS_EXTENSIONS = ['.sms'].freeze
     GG_EXTENSIONS = ['.gg'].freeze
     MD_EXTENSIONS = ['.md', '.gen', '.smd'].freeze
     GENERIC_ROM_EXTENSIONS = ['.bin', '.rom'].freeze
-    ROM_EXTENSIONS = (SMS_EXTENSIONS + GG_EXTENSIONS + MD_EXTENSIONS + GENERIC_ROM_EXTENSIONS).freeze
+    ARCHIVE_EXTENSIONS = ['.zip', '.7z'].freeze
+    ROM_EXTENSIONS = (SMS_EXTENSIONS + GG_EXTENSIONS + MD_EXTENSIONS + GENERIC_ROM_EXTENSIONS + ARCHIVE_EXTENSIONS).freeze
 
     Info = Struct.new(:system, :format, :path, :name, :header_offset, :copier_header, :md_regions,
       :smd_interleaved, keyword_init: true) do
@@ -31,16 +34,41 @@ module AstralVerse
       ROM_EXTENSIONS.include?(File.extname(filename).downcase)
     end
 
+    def archive_extension?(filename)
+      ARCHIVE_EXTENSIONS.include?(File.extname(filename).downcase)
+    end
+
     def detect_file(path)
-      detect(File.binread(path, HEADER_READ_SIZE).bytes, path: path)
-    rescue SystemCallError
+      loaded = load_file(path, limit: HEADER_READ_SIZE)
+      detect(loaded[:bytes], path: path, archive_entry: loaded[:entry])
+    rescue SystemCallError, IOError
       nil
     end
 
-    def detect(data, path: nil)
+    def load_rom_file(path)
+      loaded = load_file(path)
+      info = detect(loaded[:bytes].first(HEADER_READ_SIZE), path: path, archive_entry: loaded[:entry])
+      return nil unless info
+
+      { info: info, bytes: loaded[:bytes] }
+    rescue SystemCallError, IOError
+      nil
+    end
+
+    def load_file(path, limit: nil)
+      if archive_extension?(path)
+        load_archive(path, limit: limit)
+      else
+        data = limit ? File.binread(path, limit) : File.binread(path)
+        { bytes: data.bytes, entry: nil }
+      end
+    end
+
+    def detect(data, path: nil, archive_entry: nil)
       bytes = data.is_a?(String) ? data.bytes : data
-      ext = path ? File.extname(path).downcase : ''
-      name = path ? File.basename(path) : nil
+      ext_source = archive_entry || path
+      ext = ext_source ? File.extname(ext_source).downcase : ''
+      name = archive_entry ? File.basename(archive_entry) : (path ? File.basename(path) : nil)
 
       md_offset = mega_drive_header_offset(bytes)
       if md_offset
@@ -68,6 +96,36 @@ module AstralVerse
 
       Info.new(system: system, format: system == :mega_drive ? :mega_drive : :sms_family,
         path: path, name: name, header_offset: nil, copier_header: false)
+    end
+
+    def load_archive(path, limit: nil)
+      entry = archive_entries(path).find { |name| rom_extension?(name) && !archive_extension?(name) }
+      raise IOError, "no ROM in archive: #{path}" unless entry
+
+      data = extract_archive_entry(path, entry)
+      data = data.bytes.first(limit).pack('C*') if limit
+      { bytes: data.bytes, entry: entry }
+    end
+
+    def archive_entries(path)
+      stdout, stderr, status = Open3.capture3('7z', 'l', '-slt', path)
+      raise IOError, stderr unless status.success?
+
+      stdout.each_line.filter_map do |line|
+        next unless line.start_with?('Path = ')
+
+        entry = line.sub('Path = ', '').strip
+        next if entry.empty? || entry == path || entry.end_with?('/')
+
+        entry
+      end
+    end
+
+    def extract_archive_entry(path, entry)
+      stdout, stderr, status = Open3.capture3('7z', 'x', '-so', path, entry)
+      raise IOError, stderr unless status.success?
+
+      stdout
     end
 
     def system_from_extension(ext)
