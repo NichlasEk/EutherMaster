@@ -19,7 +19,7 @@ module MegaDrive
       @port_a = 0xFF
       @port_b = 0xFF
       @data = 0x40
-      @control = 0x40
+      @control = 0x00
     end
 
     def read_data

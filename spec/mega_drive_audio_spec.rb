@@ -764,6 +764,12 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_word(0xA10002) & 0x20).to eq(0)
   end
 
+  it 'cold-boots Genesis controller control registers as zero' do
+    bus = MegaDrive::M68KBus.new(controller: MegaDrive::Controller.new)
+
+    expect(bus.read_word(0xA10008)).to eq(0)
+  end
+
   it 'duplicates byte writes to Mega Drive VDP ports like the 16-bit bus' do
     vdp = MegaDrive::VDP.new
     bus = MegaDrive::M68KBus.new(vdp: vdp)
