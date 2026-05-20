@@ -1,6 +1,6 @@
 module MegaDrive
   class Emulator
-    attr_reader :cpu, :bus, :z80_cpu, :z80_bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller
+    attr_reader :cpu, :bus, :z80_cpu, :z80_bus, :frame_count, :rom_info, :perf, :render_version, :ym2612, :audio, :vdp, :controller, :controller_b
 
     LINES_PER_FRAME = 262
     PAL_LINES_PER_FRAME = 313
@@ -22,6 +22,7 @@ module MegaDrive
       build_audio
       build_video
       @controller = Controller.new
+      @controller_b = Controller.new
       build_buses
       @cpu = M68K.new(@bus)
       @frame_count = 0
@@ -43,6 +44,7 @@ module MegaDrive
       build_audio
       build_video
       @controller = Controller.new
+      @controller_b = Controller.new
       build_buses
       @bus.load_rom(rom_bytes)
       apply_region_configuration
@@ -59,6 +61,7 @@ module MegaDrive
       @z80_cpu.reset
       @vdp.reset
       @controller.reset
+      @controller_b.reset
       @cpu.reset if @rom_loaded
       @frame_count = 0
       @z80_remainder = 0
@@ -201,6 +204,8 @@ module MegaDrive
       @bus.ym2612 = @ym2612
       @bus.vdp = @vdp
       @bus.controller = @controller
+      @controller_b ||= Controller.new
+      @bus.controller_b = @controller_b
       @bus.z80_bus = @z80_bus
       @bus.z80_cpu = @z80_cpu
       @vdp.bus = @bus
@@ -242,7 +247,7 @@ module MegaDrive
     end
 
     def build_buses
-      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller)
+      @bus = M68KBus.new(psg: @sms_psg, ym2612: @ym2612, vdp: @vdp, controller: @controller, controller_b: @controller_b)
       @z80_bus = Z80Bus.new(psg: @sms_psg, ym2612: @ym2612, m68k_bus: @bus)
       @z80_cpu = SmsEmulator::Z80.new(@z80_bus)
       @bus.z80_bus = @z80_bus

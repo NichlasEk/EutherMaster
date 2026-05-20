@@ -145,6 +145,7 @@ module MegaDrive
         return dbcc(opcode) if (opcode & 0xF0F8) == 0x50C8
         return scc(opcode) if (opcode & 0xF0C0) == 0x50C0
         return addq_subq(opcode) if (opcode & 0xF000) == 0x5000 && ((opcode >> 6) & 0x03) != 0x03
+        return tas(opcode) if (opcode & 0xFFC0) == 0x4AC0
         return tst(opcode) if (opcode & 0xFF00) == 0x4A00
         return ext(opcode) if (opcode & 0xFFB8) == 0x4880
         return movem(opcode) if (opcode & 0xFB80) == 0x4880 || (opcode & 0xFB80) == 0x4C80
@@ -720,6 +721,26 @@ module MegaDrive
       finish(mode == 0 ? 4 : 8)
     end
 
+    def tas(opcode)
+      mode = (opcode >> 3) & 0x07
+      reg = opcode & 0x07
+      address = nil
+      value = if mode.zero?
+                read_ea(mode, reg, SIZE_BYTE)
+              else
+                address = writable_memory_ea_address(mode, reg, SIZE_BYTE)
+                read_sized(address, SIZE_BYTE)
+              end
+      set_nz_flags(value, SIZE_BYTE, keep_x: true)
+      result = value | 0x80
+      # Mega Drive hardware does not reliably assert the external write cycle for
+      # TAS memory targets. EutherDrive models this by only writing back register
+      # direct TAS results, which avoids poisoning software lock bytes in games
+      # such as Gargoyles.
+      write_ea(mode, reg, SIZE_BYTE, result) if mode.zero?
+      finish(mode.zero? ? 4 : 14)
+    end
+
     def ext(opcode)
       reg = opcode & 0x07
       if (opcode & 0x0040).zero?
@@ -815,15 +836,23 @@ module MegaDrive
           return finish(BUSY_WAIT_BRANCH_CYCLES)
         end
         @pc = target
-        finish(short_tst_busy_wait?(displacement, target) ? BUSY_WAIT_BRANCH_CYCLES : 10)
+        finish(short_busy_wait?(displacement, target) ? BUSY_WAIT_BRANCH_CYCLES : 10)
       else
         finish(displacement.zero? ? 12 : 8)
       end
     end
 
+    def short_busy_wait?(displacement, target)
+      short_tst_busy_wait?(displacement, target) || short_cmp_busy_wait?(displacement, target)
+    end
+
     def short_tst_busy_wait?(displacement, target)
       (displacement == 0xFA && read_word(target) == 0x4A38) ||
         (displacement == 0xF8 && read_word(target) == 0x4A39)
+    end
+
+    def short_cmp_busy_wait?(displacement, target)
+      displacement == 0xF8 && read_word(target) == 0xB039
     end
 
     def counter_tst_busy_wait?(displacement, target)

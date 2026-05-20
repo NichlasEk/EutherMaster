@@ -770,6 +770,30 @@ RSpec.describe 'Mega Drive audio' do
     expect(bus.read_word(0xA10008)).to eq(0)
   end
 
+  it 'routes the second controller through the Genesis I/O ports' do
+    controller_b = MegaDrive::Controller.new
+    bus = MegaDrive::M68KBus.new(controller: MegaDrive::Controller.new, controller_b: controller_b)
+
+    bus.write_byte(0xA1000B, 0x40)
+    bus.write_byte(0xA10005, 0x00)
+    expect(bus.read_byte(0xA10005)).to eq(0xB3)
+
+    bus.write_byte(0xA10005, 0x40)
+    expect(bus.read_byte(0xA10005)).to eq(0xFF)
+  end
+
+  it 'does not write back M68K TAS memory targets on Mega Drive' do
+    bus = MegaDrive::M68KBus.new
+    cpu = MegaDrive::M68K.new(bus)
+    bus.load(0, [0x4A, 0xF9, 0xFF, 0xFF, 0x00, 0x6C]) # TAS.B $FFFF006C
+    bus.write_byte(0xFFFF006C, 0x01)
+
+    cpu.step
+
+    expect(bus.read_byte(0xFFFF006C)).to eq(0x01)
+    expect(cpu.pc).to eq(6)
+  end
+
   it 'duplicates byte writes to Mega Drive VDP ports like the 16-bit bus' do
     vdp = MegaDrive::VDP.new
     bus = MegaDrive::M68KBus.new(vdp: vdp)

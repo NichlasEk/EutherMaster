@@ -167,6 +167,7 @@ module AstralVerse
       controller = @emulator.controller
       controller.port_a = @mystic_touch.left_palm
       controller.port_b = @mystic_touch.right_palm
+      @emulator.controller_b.port_a = @mystic_touch.right_palm if @emulator.respond_to?(:controller_b) && @emulator.controller_b
     end
 
     def build_emulator(info)

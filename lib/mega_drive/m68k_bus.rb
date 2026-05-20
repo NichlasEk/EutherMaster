@@ -16,7 +16,11 @@ module MegaDrive
     Z80_BANK_REGISTER_BASE = 0x00A0_6000
     IO_VERSION_BASE = 0x00A1_0000
     IO_PORT_1_DATA_BASE = 0x00A1_0002
+    IO_PORT_2_DATA_BASE = 0x00A1_0004
+    IO_EXPANSION_DATA_BASE = 0x00A1_0006
     IO_PORT_1_CONTROL_BASE = 0x00A1_0008
+    IO_PORT_2_CONTROL_BASE = 0x00A1_000A
+    IO_EXPANSION_CONTROL_BASE = 0x00A1_000C
     VDP_BASE = 0x00C0_0000
     VDP_HV_COUNTER = 0x00C0_0008
     WORK_RAM_BASE = 0x00E0_0000
@@ -24,15 +28,16 @@ module MegaDrive
     Z80_TO_M68K_CYCLE_RATIO = 7_670_454.0 / 3_579_545.0
     M68K_TO_Z80_CYCLE_RATIO = 3_579_545.0 / 7_670_454.0
 
-    attr_accessor :psg, :ym2612, :vdp, :controller, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
+    attr_accessor :psg, :ym2612, :vdp, :controller, :controller_b, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register
 
-    def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, z80_bus: nil, z80_cpu: nil)
+    def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, controller_b: nil, z80_bus: nil, z80_cpu: nil)
       @memory = Array.new(size, 0)
       @work_ram = Array.new(WORK_RAM_MASK + 1, 0)
       @psg = psg
       @ym2612 = ym2612
       @vdp = vdp
       @controller = controller
+      @controller_b = controller_b
       @z80_bus = z80_bus
       @z80_cpu = z80_cpu
       @vdp.bus = self if @vdp
@@ -62,7 +67,11 @@ module MegaDrive
       return read_vdp_hv_counter_byte(address) if vdp_hv_counter_address?(address)
       return @version_register if io_pair?(address, IO_VERSION_BASE)
       return @controller ? @controller.read_data : 0x7F if io_pair?(address, IO_PORT_1_DATA_BASE)
+      return @controller_b ? @controller_b.read_data : 0xFF if io_pair?(address, IO_PORT_2_DATA_BASE)
+      return 0xFF if io_pair?(address, IO_EXPANSION_DATA_BASE)
       return @controller ? @controller.read_control : 0x00 if io_pair?(address, IO_PORT_1_CONTROL_BASE)
+      return @controller_b ? @controller_b.read_control : 0x00 if io_pair?(address, IO_PORT_2_CONTROL_BASE)
+      return 0x00 if io_pair?(address, IO_EXPANSION_CONTROL_BASE)
       return z80_bus_request_status if z80_bus_request_address?(address)
       return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
       return read_z80_ram(address) if z80_ram_mirror_address?(address)
@@ -102,8 +111,14 @@ module MegaDrive
         @vdp.write_control_byte(address, value)
       elsif address == (IO_PORT_1_DATA_BASE | 1)
         @controller&.write_data(value)
+      elsif address == (IO_PORT_2_DATA_BASE | 1)
+        @controller_b&.write_data(value)
       elsif io_pair?(address, IO_PORT_1_CONTROL_BASE)
         @controller&.write_control(value)
+      elsif io_pair?(address, IO_PORT_2_CONTROL_BASE)
+        @controller_b&.write_control(value)
+      elsif io_pair?(address, IO_EXPANSION_DATA_BASE) || io_pair?(address, IO_EXPANSION_CONTROL_BASE)
+        # No expansion device is attached. Writes are accepted but do not affect reads.
       elsif z80_bus_request_address?(address)
         @z80_bus_requested = (value & 0x01) != 0
       elsif z80_reset_address?(address)
@@ -245,7 +260,11 @@ module MegaDrive
     def io_address?(address)
       io_pair?(address, IO_VERSION_BASE) ||
         io_pair?(address, IO_PORT_1_DATA_BASE) ||
-        io_pair?(address, IO_PORT_1_CONTROL_BASE)
+        io_pair?(address, IO_PORT_2_DATA_BASE) ||
+        io_pair?(address, IO_EXPANSION_DATA_BASE) ||
+        io_pair?(address, IO_PORT_1_CONTROL_BASE) ||
+        io_pair?(address, IO_PORT_2_CONTROL_BASE) ||
+        io_pair?(address, IO_EXPANSION_CONTROL_BASE)
     end
 
     def z80_bus_request_status
