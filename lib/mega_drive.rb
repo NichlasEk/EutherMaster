@@ -1,5 +1,6 @@
 require_relative 'sms_emulator/cpu/z80'
 require_relative 'mega_drive/m68k'
+require_relative 'mega_drive/paprium_bus_override'
 require_relative 'mega_drive/m68k_bus'
 require_relative 'mega_drive/z80_bus'
 require_relative 'mega_drive/controller'

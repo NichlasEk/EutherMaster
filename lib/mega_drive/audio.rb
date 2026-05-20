@@ -8,7 +8,7 @@ module MegaDrive
     YM_FRAME_CYCLES = 127_800.0
     YM_RENDER_RATE = ENV.fetch('ASTRAL_MD_YM_RATE', '22050').to_i.clamp(11_025, SAMPLE_RATE)
 
-    attr_accessor :frame_cycles, :ym_frame_cycles
+    attr_accessor :frame_cycles, :ym_frame_cycles, :paprium_audio
 
     def initialize(psg, ym2612)
       @psg = psg
@@ -31,7 +31,7 @@ module MegaDrive
       Array.new(count) do |index|
         psg = psg_samples[index].to_f
         ((ym_samples[index] * YM_GAIN) + (psg * PSG_GAIN)).clamp(-1.0, 1.0)
-      end
+      end.tap { |samples| @paprium_audio&.mix_music_into(samples, count, sample_rate) }
     end
 
     def capture_frame_job(count, frame_cycles, sample_rate = SAMPLE_RATE)
@@ -40,7 +40,8 @@ module MegaDrive
         frame_cycles: frame_cycles,
         sample_rate: sample_rate,
         psg: @psg.capture_frame_job,
-        ym2612: @ym2612.capture_frame_job
+        ym2612: @ym2612.capture_frame_job,
+        paprium: @paprium_audio&.capture_audio_samples(count, sample_rate)
       }
     end
 
@@ -58,7 +59,7 @@ module MegaDrive
       Array.new(count) do |index|
         psg = psg_samples[index].to_f
         ((ym_samples[index] * YM_GAIN) + (psg * PSG_GAIN)).clamp(-1.0, 1.0)
-      end
+      end.tap { |samples| mix_paprium_job_samples!(samples, job[:paprium]) }
     end
 
     def filter_psg_samples!(samples)
@@ -79,6 +80,18 @@ module MegaDrive
     end
 
     private
+
+    def mix_paprium_job_samples!(samples, paprium_samples)
+      return samples unless paprium_samples
+
+      limit = [samples.length, paprium_samples.length].min
+      index = 0
+      while index < limit
+        samples[index] = (samples[index].to_f + paprium_samples[index].to_f).clamp(-1.0, 1.0)
+        index += 1
+      end
+      samples
+    end
 
     def render_ym_samples(count, sample_rate)
       ym_rate = [YM_RENDER_RATE, sample_rate].min

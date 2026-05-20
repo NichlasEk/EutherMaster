@@ -48,6 +48,8 @@ module MegaDrive
       @controller_b = Controller.new
       build_buses
       @bus.load_rom(rom_bytes)
+      @bus.configure_cartridge_override(rom_bytes, rom_path: path || info&.path)
+      @audio.paprium_audio = @bus.cartridge_override
       @bus.configure_sram(rom_bytes, rom_path: path || info&.path)
       apply_region_configuration
       @cpu = M68K.new(@bus)
@@ -60,6 +62,8 @@ module MegaDrive
       @bus.flush_sram
       @sms_psg.reset
       @ym2612.reset
+      @bus.reset_cartridge_override
+      @audio.paprium_audio = @bus.cartridge_override
       @z80_bus.reset
       @z80_cpu.reset
       @vdp.reset
@@ -212,6 +216,8 @@ module MegaDrive
       @bus.controller_b = @controller_b
       @bus.z80_bus = @z80_bus
       @bus.z80_cpu = @z80_cpu
+      @bus.reset_cartridge_override if @bus.respond_to?(:reset_cartridge_override)
+      @audio.paprium_audio = @bus.cartridge_override if @audio.respond_to?(:paprium_audio=)
       @vdp.bus = @bus
       apply_region_configuration
       self

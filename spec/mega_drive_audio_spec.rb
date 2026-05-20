@@ -808,6 +808,14 @@ RSpec.describe 'Mega Drive audio' do
     expect(vdp.vram[1]).to eq(0xA5)
   end
 
+  it 'exposes odd-byte VDP status reads used by Paprium boot code' do
+    vdp = MegaDrive::VDP.new
+    bus = MegaDrive::M68KBus.new(vdp: vdp)
+    bus.frame_cycle = MegaDrive::VDP::LINE_CYCLES * MegaDrive::VDP::VISIBLE_LINES
+
+    expect(bus.read_byte(0xC00005) & 0x08).to eq(0x08)
+  end
+
   it 'mirrors normal cartridge ROM reads across the MD cart window' do
     bus = MegaDrive::M68KBus.new
     bus.load_rom([0x12, 0x34, 0x56, 0x78])

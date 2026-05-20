@@ -29,7 +29,7 @@ module MegaDrive
     M68K_TO_Z80_CYCLE_RATIO = 3_579_545.0 / 7_670_454.0
 
     attr_accessor :psg, :ym2612, :vdp, :controller, :controller_b, :z80_bus, :z80_cpu, :frame_cycle, :ym_frame_cycle, :version_register, :trace_pc
-    attr_reader :sram_path
+    attr_reader :sram_path, :cartridge_override
 
     def initialize(size: 0x0100_0000, psg: nil, ym2612: nil, vdp: nil, controller: nil, controller_b: nil, z80_bus: nil, z80_cpu: nil)
       @memory = Array.new(size, 0)
@@ -43,6 +43,7 @@ module MegaDrive
       @z80_cpu = z80_cpu
       @vdp.bus = self if @vdp
       @rom = nil
+      @cartridge_override = nil
       @z80_bus_requested = false
       @z80_reset_asserted = true
       @frame_cycle = 0
@@ -60,7 +61,18 @@ module MegaDrive
     def load_rom(bytes)
       @rom = bytes.map { |byte| byte & 0xFF }.freeze
       @rom = nil if @rom.empty?
+      @cartridge_override = nil
       reset_sram
+    end
+
+    def configure_cartridge_override(rom_bytes, rom_path: nil)
+      @cartridge_override = if PapriumBusOverride.paprium_rom?(rom_bytes)
+                              PapriumBusOverride.new(rom_bytes, source_path: rom_path)
+                            end
+    end
+
+    def reset_cartridge_override
+      @cartridge_override&.reset
     end
 
     def configure_sram(rom_bytes, rom_path: nil)
@@ -95,6 +107,8 @@ module MegaDrive
         @ym2612.sync_to_cycle(@ym_frame_cycle)
         return @ym2612.read_register(address)
       end
+      return read_vdp_data_byte(address) if vdp_data_address?(address)
+      return read_vdp_control_byte(address) if vdp_control_address?(address)
       return read_vdp_hv_counter_byte(address) if vdp_hv_counter_address?(address)
       return @version_register if io_pair?(address, IO_VERSION_BASE)
       return @controller ? @controller.read_data : 0x7F if io_pair?(address, IO_PORT_1_DATA_BASE)
@@ -108,6 +122,10 @@ module MegaDrive
       return z80_bus_request_status if z80_bus_request_address?(address)
       return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
       return read_z80_ram(address) if z80_ram_mirror_address?(address)
+      if @cartridge_override
+        override = @cartridge_override.read_byte(address)
+        return override unless override.nil?
+      end
       return read_sram_byte(address) if sram_address?(address)
       trace_sram("read8 default-sram-window #{hex24(address)} mapped=#{@sram_enabled}") if default_sram_window?(address)
       if work_ram_address?(address)
@@ -126,6 +144,10 @@ module MegaDrive
       return @vdp.read_control if vdp_control_address?(address)
       return @vdp.read_hv_counter if vdp_hv_counter_address?(address)
       return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
+      if @cartridge_override
+        override = @cartridge_override.read_word(address)
+        return override unless override.nil?
+      end
       if sram_lock_span_address?(address, 2)
         value = @sram_enabled ? 0x0101 : 0x0000
         trace_sram("read16 lock #{hex24(address)} -> #{hex16(value)}")
@@ -195,6 +217,8 @@ module MegaDrive
         write_z80_ram(address, value)
       elsif z80_bank_register_address?(address)
         @z80_bus&.write_byte(0x6000, value)
+      elsif @cartridge_override&.write_byte(address, value)
+        # Handled by cartridge-specific hardware.
       elsif sram_address?(address)
         write_sram_byte(address, value)
       elsif default_sram_window?(address)
@@ -229,6 +253,8 @@ module MegaDrive
       elsif z80_ram_mirror_address?(address)
         write_z80_ram(address, (value >> 8) & 0xFF)
         return
+      elsif @cartridge_override&.write_word(address, value)
+        return
       elsif work_ram_address?(address)
         offset = address & WORK_RAM_MASK
         trace_sram("write16 ram #{hex24(address)} <= #{hex16(value)}") if trace_ram_address?(address)
@@ -251,6 +277,38 @@ module MegaDrive
 
       write_word(address, (value >> 16) & 0xFFFF)
       write_word(address + 2, value & 0xFFFF)
+    end
+
+    def work_ram_fast_address?(address, bytes = 1)
+      address &= ADDRESS_MASK
+      address >= WORK_RAM_BASE && ((address + bytes - 1) & ADDRESS_MASK) >= WORK_RAM_BASE
+    end
+
+    def read_work_ram_word_fast(address)
+      offset = address & WORK_RAM_MASK
+      ((@work_ram[offset] << 8) | @work_ram[(offset + 1) & WORK_RAM_MASK]) & 0xFFFF
+    end
+
+    def read_work_ram_long_fast(address)
+      offset = address & WORK_RAM_MASK
+      ((@work_ram[offset] << 24) |
+        (@work_ram[(offset + 1) & WORK_RAM_MASK] << 16) |
+        (@work_ram[(offset + 2) & WORK_RAM_MASK] << 8) |
+        @work_ram[(offset + 3) & WORK_RAM_MASK]) & 0xFFFF_FFFF
+    end
+
+    def write_work_ram_word_fast(address, value)
+      offset = address & WORK_RAM_MASK
+      @work_ram[offset] = (value >> 8) & 0xFF
+      @work_ram[(offset + 1) & WORK_RAM_MASK] = value & 0xFF
+    end
+
+    def write_work_ram_long_fast(address, value)
+      offset = address & WORK_RAM_MASK
+      @work_ram[offset] = (value >> 24) & 0xFF
+      @work_ram[(offset + 1) & WORK_RAM_MASK] = (value >> 16) & 0xFF
+      @work_ram[(offset + 2) & WORK_RAM_MASK] = (value >> 8) & 0xFF
+      @work_ram[(offset + 3) & WORK_RAM_MASK] = value & 0xFF
     end
 
     def interrupt_level = @vdp&.irq_level || 0
@@ -319,6 +377,16 @@ module MegaDrive
 
     def read_vdp_hv_counter_byte(address)
       word = @vdp.read_hv_counter
+      address.even? ? ((word >> 8) & 0xFF) : (word & 0xFF)
+    end
+
+    def read_vdp_data_byte(address)
+      word = @vdp.read_data
+      address.even? ? ((word >> 8) & 0xFF) : (word & 0xFF)
+    end
+
+    def read_vdp_control_byte(address)
+      word = @vdp.read_control
       address.even? ? ((word >> 8) & 0xFF) : (word & 0xFF)
     end
 
@@ -580,11 +648,11 @@ module MegaDrive
     end
 
     def vdp_data_address?(address)
-      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x00, 0x02].include?(address & 0x1F)
+      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x00, 0x01, 0x02, 0x03].include?(address & 0x1F)
     end
 
     def vdp_control_address?(address)
-      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x04, 0x06].include?(address & 0x1F)
+      @vdp && (address & 0x00FF_FFE0) == VDP_BASE && [0x04, 0x05, 0x06, 0x07].include?(address & 0x1F)
     end
   end
 end

@@ -114,6 +114,12 @@ module MegaDrive
       when 0x4E75
         @pc = pop_long & ADDRESS_MASK
         finish(16)
+      when 0x2298
+        fast_work_ram_move_a0_to_a1(SIZE_LONG, dest_postinc: false)
+      when 0x3298
+        fast_work_ram_move_a0_to_a1(SIZE_WORD, dest_postinc: false)
+      when 0x33D8
+        fast_work_ram_move_a0_to_a1(SIZE_WORD, dest_postinc: true)
       else
         return trap(opcode & 0x0F) if (opcode & 0xFFF0) == 0x4E40
         return movep(opcode) if movep_opcode?(opcode)
@@ -203,6 +209,34 @@ module MegaDrive
       @d[reg] = imm & 0xFFFF_FFFF
       set_nz_flags(@d[reg], SIZE_LONG, keep_x: true)
       finish(4)
+    end
+
+    def fast_work_ram_move_a0_to_a1(size, dest_postinc:)
+      bytes = size == SIZE_LONG ? 4 : 2
+      source = @a[0]
+      dest = @a[1]
+      unless @bus.respond_to?(:work_ram_fast_address?) &&
+             @bus.work_ram_fast_address?(source, bytes) &&
+             @bus.work_ram_fast_address?(dest, bytes)
+        return move(size == SIZE_LONG ? 0x2298 : (dest_postinc ? 0x33D8 : 0x3298))
+      end
+
+      value = if size == SIZE_LONG
+                @bus.read_work_ram_long_fast(source)
+              else
+                @bus.read_work_ram_word_fast(source)
+              end
+
+      if size == SIZE_LONG
+        @bus.write_work_ram_long_fast(dest, value)
+      else
+        @bus.write_work_ram_word_fast(dest, value)
+      end
+
+      @a[0] = (source + bytes) & 0xFFFF_FFFF
+      @a[1] = (dest + bytes) & 0xFFFF_FFFF if dest_postinc
+      set_nz_flags(value, size, keep_x: true)
+      finish(size == SIZE_LONG ? 8 : 4)
     end
 
     def shift_register(opcode)
@@ -844,7 +878,9 @@ module MegaDrive
     end
 
     def short_busy_wait?(displacement, target)
-      short_tst_busy_wait?(displacement, target) || short_cmp_busy_wait?(displacement, target)
+      short_tst_busy_wait?(displacement, target) ||
+        short_cmp_busy_wait?(displacement, target) ||
+        short_vdp_status_bit_busy_wait?(displacement, target)
     end
 
     def short_tst_busy_wait?(displacement, target)
@@ -854,6 +890,20 @@ module MegaDrive
 
     def short_cmp_busy_wait?(displacement, target)
       displacement == 0xF8 && read_word(target) == 0xB039
+    end
+
+    def short_vdp_status_bit_busy_wait?(displacement, target)
+      return false unless (@a[0] & ADDRESS_MASK) == 0x00C0_0005
+
+      if displacement == 0xF8
+        read_word(target) == 0x1010 && read_word(target + 2) == 0x0800
+      elsif displacement == 0xF2
+        read_word(target) == 0x2079 &&
+          read_word(target + 6) == 0x1010 &&
+          read_word(target + 8) == 0x0800
+      else
+        false
+      end
     end
 
     def counter_tst_busy_wait?(displacement, target)
