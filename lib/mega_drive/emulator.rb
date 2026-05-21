@@ -30,6 +30,7 @@ module MegaDrive
       @render_version = 0
       @z80_remainder = 0
       @z80_pending = 0
+      @z80_irq_asserted = false
       reset_perf
     end
 
@@ -73,6 +74,7 @@ module MegaDrive
       @frame_count = 0
       @z80_remainder = 0
       @z80_pending = 0
+      @z80_irq_asserted = false
       reset_perf
       apply_region_configuration
     end
@@ -154,7 +156,7 @@ module MegaDrive
       end
       @z80_remainder = 0
       @z80_pending = z80_pending
-      @z80_cpu.interrupt(0xFF) if @bus.z80_running?
+      @z80_irq_asserted = true
       cpu_finished = monotonic_time
       @vdp.end_vblank!
       @vdp.render_frame
@@ -189,6 +191,7 @@ module MegaDrive
 
       target_frame_cycle = @bus.frame_cycle.to_f
       target_ym_cycle = @bus.ym_frame_cycle.to_f
+      pending -= service_z80_interrupt if @z80_irq_asserted
       while pending >= Z80_BATCH_CYCLES || (allow_partial && pending.positive?)
         cycles = pending >= Z80_BATCH_CYCLES ? Z80_BATCH_CYCLES : pending
         @bus.frame_cycle = target_frame_cycle - pending
@@ -203,7 +206,14 @@ module MegaDrive
       pending
     end
 
+    def service_z80_interrupt
+      cycles = @z80_cpu.interrupt(0xFF)
+      @z80_irq_asserted = false if cycles.positive?
+      cycles
+    end
+
     def rewire_after_snapshot_load
+      @z80_irq_asserted = false if @z80_irq_asserted.nil?
       @audio ||= Audio.new(@sms_psg, @ym2612)
       @z80_bus ||= Z80Bus.new(psg: @sms_psg, ym2612: @ym2612, m68k_bus: @bus)
       @z80_cpu ||= SmsEmulator::Z80.new(@z80_bus)

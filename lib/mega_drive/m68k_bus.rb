@@ -252,6 +252,7 @@ module MegaDrive
         trace_sram("write16 default-sram-window #{hex24(address)} <= #{hex16(value)} mapped=#{@sram_enabled}")
       elsif z80_ram_mirror_address?(address)
         write_z80_ram(address, (value >> 8) & 0xFF)
+        write_z80_ram(address + 1, value & 0xFF)
         return
       elsif @cartridge_override&.write_word(address, value)
         return

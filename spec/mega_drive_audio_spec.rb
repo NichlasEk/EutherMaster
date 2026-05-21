@@ -314,17 +314,24 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
   end
 
-  it 'maps 68k-side word writes into Z80 RAM as high-byte-only writes' do
+  it 'maps 68k-side word writes into both Z80 RAM bytes' do
     emulator = MegaDrive::Emulator.new
 
     emulator.bus.write_word(0xA00000, 0x3EA0)
     emulator.bus.write_word(0xA00002, 0x3200)
 
     expect(emulator.z80_bus.read_byte(0x0000)).to eq(0x3E)
-    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0x00)
+    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
     expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
     expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
-    expect(emulator.bus.read_word(0xA00000)).to eq(0x3E3E)
+  end
+
+  it 'maps 68k-side long writes into consecutive Z80 RAM bytes' do
+    emulator = MegaDrive::Emulator.new
+
+    emulator.bus.write_long(0xA00010, 0x12345678)
+
+    expect((0...4).map { |offset| emulator.z80_bus.read_byte(0x0010 + offset) }).to eq([0x12, 0x34, 0x56, 0x78])
   end
 
   it 'leaves Mega Drive Z80 I/O ports unwired' do
@@ -419,6 +426,26 @@ RSpec.describe 'Mega Drive audio' do
     emulator.bus.run_z80_cycles(32)
 
     expect(emulator.z80_cpu.pc).to eq(0)
+  end
+
+  it 'latches the frame IRQ until the Z80 bus is available' do
+    emulator = MegaDrive::Emulator.new
+    emulator.z80_cpu.sp = 0x1FFE
+    emulator.z80_cpu.iff1 = true
+    emulator.z80_cpu.im = 1
+    emulator.instance_variable_set(:@z80_irq_asserted, true)
+    emulator.bus.write_byte(0xA11200, 0x01)
+    emulator.bus.write_byte(0xA11100, 0x01)
+
+    expect(emulator.send(:drain_z80_pending, 32, allow_partial: true)).to eq(0)
+    expect(emulator.instance_variable_get(:@z80_irq_asserted)).to be true
+
+    emulator.bus.write_byte(0xA11100, 0x00)
+    pending = emulator.send(:drain_z80_pending, 32, allow_partial: true)
+
+    expect(emulator.instance_variable_get(:@z80_irq_asserted)).to be false
+    expect(emulator.z80_cpu.pc).to be > 0x0038
+    expect(pending).to be < 32
   end
 
   it 'carries Z80 instruction overrun as timing debt' do

@@ -110,6 +110,23 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.d[0]).to eq(0x0000_0001)
   end
 
+  it 'coalesces consecutive NOP instructions without changing elapsed cycles' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4E71,
+      0x4E71,
+      0x4E71,
+      0x7005
+    ])
+
+    cpu.step
+    expect(cpu.pc).to eq(0x106)
+    expect(cpu.cycles).to eq(12)
+
+    cpu.step
+    expect(cpu.d[0]).to eq(5)
+  end
+
   it 'uses the extension word address as the base for word branch displacements' do
     reset_to(0x100)
     load_program(0x100, [
@@ -123,6 +140,43 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.pc).to eq(0x106)
     cpu.step
     expect(cpu.d[0]).to eq(0x42)
+  end
+
+  it 'fast-paths common Z80 sound bus helper calls' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x6100, 0x00FE, # BSR.W -> $200
+      0x6100, 0x011A  # BSR.W -> $220
+    ])
+    load_program(0x200, [
+      0x13FC, 0x0001, 0x00A1, 0x1100, # MOVE.B #1,$A11100
+      0x2F00,                         # MOVE.L D0,-(A7)
+      0x1039, 0x00A1, 0x1100,         # MOVE.B $A11100,D0
+      0x0200, 0x0001,                 # ANDI.B #1,D0
+      0x66F4,                         # BNE back to poll
+      0x50F9, 0x00FF, 0x009E,         # ST $FF009E
+      0x201F,                         # MOVE.L (A7)+,D0
+      0x4E75                          # RTS
+    ])
+    load_program(0x220, [
+      0x13FC, 0x0000, 0x00A1, 0x1100, # MOVE.B #0,$A11100
+      0x51F9, 0x00FF, 0x009E,         # SF $FF009E
+      0x4E75                          # RTS
+    ])
+    cpu.d[0] = 0x1234_5678
+
+    cpu.step
+    expect(cpu.pc).to eq(0x104)
+    expect(cpu.ssp).to eq(0x00FF0000)
+    expect(cpu.d[0]).to eq(0x1234_5678)
+    expect(bus.read_byte(0xA11100) & 0x01).to eq(0)
+    expect(bus.read_byte(0xFF009E)).to eq(0xFF)
+
+    cpu.step
+    expect(cpu.pc).to eq(0x108)
+    expect(cpu.ssp).to eq(0x00FF0000)
+    expect(bus.read_byte(0xA11100) & 0x01).to eq(1)
+    expect(bus.read_byte(0xFF009E)).to eq(0)
   end
 
   it 'jumps and calls through absolute long addresses' do

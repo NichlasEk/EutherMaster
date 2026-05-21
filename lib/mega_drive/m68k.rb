@@ -100,7 +100,7 @@ module MegaDrive
     def execute_opcode(opcode)
       case opcode
       when 0x4E71
-        finish(4)
+        coalesce_nop_run
       when 0x4E70
         finish(132)
       when 0x4E72
@@ -859,6 +859,8 @@ module MegaDrive
       offset = displacement.zero? ? sign_extend(fetch_word, 16) : sign_extend(displacement, 8)
       target = (base + offset) & ADDRESS_MASK
       if condition == 1
+        return fast_sound_bus_helper_call(target, @pc) if fast_sound_bus_helper?(target)
+
         push_long(@pc)
         @pc = target
         return finish(displacement.zero? ? 18 : 18)
@@ -916,6 +918,49 @@ module MegaDrive
       counter_address = read_long(target + 2)
       iterations = BUSY_WAIT_BRANCH_CYCLES / 20
       write_byte(counter_address, read_byte(counter_address) + iterations)
+    end
+
+    def coalesce_nop_run
+      count = 1
+      while count < 16 && read_word(@pc) == 0x4E71
+        @pc = (@pc + 2) & ADDRESS_MASK
+        count += 1
+      end
+      finish(count * 4)
+    end
+
+    def fast_sound_bus_helper?(target)
+      (read_word(target) == 0x13FC &&
+        read_word(target + 2) == 0x0001 &&
+        read_long(target + 4) == 0x00A1_1100 &&
+        read_word(target + 8) == 0x2F00 &&
+        read_word(target + 10) == 0x1039 &&
+        read_long(target + 12) == 0x00A1_1100 &&
+        read_word(target + 16) == 0x0200 &&
+        read_word(target + 18) == 0x0001 &&
+        read_word(target + 20) == 0x66F4 &&
+        read_word(target + 22) == 0x50F9 &&
+        read_word(target + 28) == 0x201F &&
+        read_word(target + 30) == 0x4E75) ||
+        (read_word(target) == 0x13FC &&
+          read_word(target + 2).zero? &&
+          read_long(target + 4) == 0x00A1_1100 &&
+          read_word(target + 8) == 0x51F9 &&
+          read_word(target + 14) == 0x4E75)
+    end
+
+    def fast_sound_bus_helper_call(target, return_pc)
+      if read_word(target + 2).zero?
+        write_byte(0x00A1_1100, 0)
+        write_byte(read_long(target + 10), 0)
+        @pc = return_pc
+        return finish(70)
+      end
+
+      write_byte(0x00A1_1100, 1)
+      write_byte(read_long(target + 24), 0xFF)
+      @pc = return_pc
+      finish(126)
     end
 
     def dbcc(opcode)
