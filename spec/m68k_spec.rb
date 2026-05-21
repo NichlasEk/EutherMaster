@@ -224,6 +224,22 @@ RSpec.describe MegaDrive::M68K do
     expect(cpu.cycles).to eq(MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES)
   end
 
+  it 'coalesces d16 address-register CMP busy-wait branches' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x4DF8, 0x0200, # LEA $0200,A6
+      0x302E, 0x002E, # MOVE.W $2E(A6),D0
+      0xB06E, 0x002E, # CMP.W $2E(A6),D0
+      0x67FA          # BEQ back to CMP
+    ])
+    bus.write_word(0x22E, 0x1234)
+
+    4.times { cpu.step }
+
+    expect(cpu.pc).to eq(0x108)
+    expect(cpu.cycles).to be >= MegaDrive::M68K::BUSY_WAIT_BRANCH_CYCLES
+  end
+
   it 'coalesces counted absolute-long TST busy-wait branches' do
     reset_to(0x100)
     load_program(0x100, [

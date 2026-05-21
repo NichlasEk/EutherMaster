@@ -882,6 +882,7 @@ module MegaDrive
     def short_busy_wait?(displacement, target)
       short_tst_busy_wait?(displacement, target) ||
         short_cmp_busy_wait?(displacement, target) ||
+        short_cmp_d16_an_busy_wait?(displacement, target) ||
         short_vdp_status_bit_busy_wait?(displacement, target)
     end
 
@@ -892,6 +893,12 @@ module MegaDrive
 
     def short_cmp_busy_wait?(displacement, target)
       displacement == 0xF8 && read_word(target) == 0xB039
+    end
+
+    def short_cmp_d16_an_busy_wait?(displacement, target)
+      displacement == 0xFA &&
+        (read_word(target) & 0xF1F8) == 0xB068 &&
+        read_word(target + 4) == 0x67FA
     end
 
     def short_vdp_status_bit_busy_wait?(displacement, target)

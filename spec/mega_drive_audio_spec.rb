@@ -290,6 +290,15 @@ RSpec.describe 'Mega Drive audio' do
     expect(samples[3]).to be > samples[2]
   end
 
+  it 'removes Mega Drive PSG DC bias with a sparse tracker' do
+    audio = MegaDrive::Audio.new(MegaDrive::PSG.new, MegaDrive::YM2612.new)
+    samples = Array.new(512, 0.5)
+
+    audio.filter_psg_samples!(samples)
+
+    expect(samples.last).to be < 0.35
+  end
+
   it 'grants the Z80 bus immediately for 68k-side boot code' do
     bus = MegaDrive::M68KBus.new
 

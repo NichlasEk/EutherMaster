@@ -55,8 +55,10 @@ module MegaDrive
       @key_mask = Array.new(CHANNELS, 0)
       @fnum = Array.new(CHANNELS, 0)
       @block = Array.new(CHANNELS, 0)
+      @channel_frequency = Array.new(CHANNELS, 0.0)
       @operator_fnum = Array.new(CHANNELS * OPERATORS, 0)
       @operator_block = Array.new(CHANNELS * OPERATORS, 0)
+      @operator_frequency = Array.new(CHANNELS * OPERATORS, 0.0)
       @algorithm = Array.new(CHANNELS, 0)
       @feedback = Array.new(CHANNELS, 0)
       @pan_l = Array.new(CHANNELS, true)
@@ -161,6 +163,7 @@ module MegaDrive
       samples = Array.new(count) { [0.0, 0.0] }
       cycle_position = 0.0
       cycle_step = frame_cycles.to_f / count
+      sample_step = 1.0 / sample_rate
 
       count.times do |sample_index|
         cycle = cycle_position.to_i
@@ -170,7 +173,7 @@ module MegaDrive
           write_register(write[:port], write[:reg], write[:value], log: false)
           write_index += 1
         end
-        samples[sample_index] = render_sample(sample_rate)
+        samples[sample_index] = render_sample_fast(sample_step)
       end
 
       rendered_phase = @phase
@@ -198,6 +201,7 @@ module MegaDrive
       samples = Array.new(count, 0.0)
       cycle_position = 0.0
       cycle_step = frame_cycles.to_f / count
+      sample_step = 1.0 / sample_rate
 
       count.times do |sample_index|
         cycle = cycle_position.to_i
@@ -207,7 +211,7 @@ module MegaDrive
           write_register(write[:port], write[:reg], write[:value], log: false)
           write_index += 1
         end
-        samples[sample_index] = render_sample_mono_fast(1.0 / sample_rate)
+        samples[sample_index] = render_sample_mono_fast(sample_step)
       end
 
       rendered_phase = @phase
@@ -243,6 +247,7 @@ module MegaDrive
       samples = Array.new(count, 0.0)
       cycle_position = 0.0
       cycle_step = frame_cycles.to_f / count
+      sample_step = 1.0 / sample_rate
 
       count.times do |sample_index|
         cycle = cycle_position.to_i
@@ -252,7 +257,7 @@ module MegaDrive
           write_register(write[:port], write[:reg], write[:value], log: false)
           write_index += 1
         end
-        samples[sample_index] = render_sample_mono_fast(1.0 / sample_rate)
+        samples[sample_index] = render_sample_mono_fast(sample_step)
       end
 
       @async_audio_initialized = true
@@ -292,12 +297,16 @@ module MegaDrive
         write_operator_register(port, reg, value)
       when 0xA0..0xA2
         channel = channel_index(port, reg & 0x03)
-        @fnum[channel] = (@fnum[channel] & 0x700) | value if channel
+        if channel
+          @fnum[channel] = (@fnum[channel] & 0x700) | value
+          refresh_channel_frequency(channel)
+        end
       when 0xA4..0xA6
         channel = channel_index(port, reg & 0x03)
         if channel
           @fnum[channel] = (@fnum[channel] & 0x0FF) | ((value & 0x07) << 8)
           @block[channel] = (value >> 3) & 0x07
+          refresh_channel_frequency(channel)
         end
       when 0xA8..0xAA
         write_special_operator_frequency(port, reg, value, high: false)
@@ -416,6 +425,7 @@ module MegaDrive
       else
         @operator_fnum[idx] = (@operator_fnum[idx] & 0x700) | value
       end
+      refresh_operator_frequency(idx)
     end
 
     def special_frequency_operator(reg)
@@ -442,6 +452,10 @@ module MegaDrive
     end
 
     def render_sample(sample_rate)
+      render_sample_fast(1.0 / sample_rate)
+    end
+
+    def render_sample_fast(sample_step)
       left = 0.0
       right = 0.0
       key_mask = @key_mask
@@ -457,7 +471,7 @@ module MegaDrive
           next
         end
 
-        sample = channel_sample(channel, sample_rate)
+        sample = channel_sample_fast(channel, sample_step)
         sample = render_dac_sample if channel == 5 && dac_enabled
         left += sample if pan_l[channel]
         right += sample if pan_r[channel]
@@ -579,20 +593,39 @@ module MegaDrive
     end
 
     def channel_frequency(channel)
-      fnum = @fnum[channel]
-      return 0.0 if fnum.zero?
-
-      fnum * (2.0**(@block[channel] - 1)) * FNUM_HZ_SCALE
+      @channel_frequency[channel]
     end
 
     def operator_frequency(channel, op, fallback)
       return fallback if op == 3 || (@timer_control & 0xC0).zero?
 
       idx = channel * OPERATORS + op
-      fnum = @operator_fnum[idx]
-      return fallback if fnum.zero?
+      @operator_frequency[idx].positive? ? @operator_frequency[idx] : fallback
+    end
 
-      fnum * (2.0**(@operator_block[idx] - 1)) * FNUM_HZ_SCALE
+    def refresh_channel_frequency(channel)
+      fnum = @fnum[channel]
+      @channel_frequency[channel] = fnum.zero? ? 0.0 : fnum * (2.0**(@block[channel] - 1)) * FNUM_HZ_SCALE
+    end
+
+    def refresh_operator_frequency(idx)
+      fnum = @operator_fnum[idx]
+      @operator_frequency[idx] = fnum.zero? ? 0.0 : fnum * (2.0**(@operator_block[idx] - 1)) * FNUM_HZ_SCALE
+    end
+
+    def refresh_frequencies!
+      channel = 0
+      while channel < CHANNELS
+        refresh_channel_frequency(channel)
+        channel += 1
+      end
+
+      idx = 0
+      limit = CHANNELS * OPERATORS
+      while idx < limit
+        refresh_operator_frequency(idx)
+        idx += 1
+      end
     end
 
     def operator_sample(idx, base, sample_step, modulation = 0.0)
@@ -661,6 +694,8 @@ module MegaDrive
       @detune ||= Array.new(count, 0)
       @operator_fnum ||= Array.new(count, 0)
       @operator_block ||= Array.new(count, 0)
+      @operator_frequency ||= Array.new(count, 0.0)
+      @channel_frequency ||= Array.new(CHANNELS, 0.0)
       @envelope_stage ||= Array.new(count, :off)
       @operator_output ||= Array.new(count, 0.0)
       @operator_last_output ||= Array.new(count, 0.0)
@@ -673,8 +708,10 @@ module MegaDrive
         key_mask: @key_mask.dup,
         fnum: @fnum.dup,
         block: @block.dup,
+        channel_frequency: @channel_frequency.dup,
         operator_fnum: @operator_fnum.dup,
         operator_block: @operator_block.dup,
+        operator_frequency: @operator_frequency.dup,
         algorithm: @algorithm.dup,
         feedback: @feedback.dup,
         pan_l: @pan_l.dup,
@@ -715,8 +752,10 @@ module MegaDrive
         key_mask: @key_mask,
         fnum: @fnum,
         block: @block,
+        channel_frequency: @channel_frequency,
         operator_fnum: @operator_fnum,
         operator_block: @operator_block,
+        operator_frequency: @operator_frequency,
         algorithm: @algorithm,
         feedback: @feedback,
         pan_l: @pan_l,
@@ -776,8 +815,10 @@ module MegaDrive
       @key_mask = state[:key_mask].dup
       @fnum = state[:fnum].dup
       @block = state[:block].dup
+      @channel_frequency = state[:channel_frequency]&.dup || Array.new(CHANNELS, 0.0)
       @operator_fnum = state[:operator_fnum]&.dup || Array.new(CHANNELS * OPERATORS, 0)
       @operator_block = state[:operator_block]&.dup || Array.new(CHANNELS * OPERATORS, 0)
+      @operator_frequency = state[:operator_frequency]&.dup || Array.new(CHANNELS * OPERATORS, 0.0)
       @algorithm = state[:algorithm].dup
       @feedback = state[:feedback].dup
       @pan_l = state[:pan_l].dup
@@ -808,6 +849,7 @@ module MegaDrive
       @busy_cycles = state[:busy_cycles] || @busy_cycles
       @last_sync_cycle = state[:last_sync_cycle] || 0
       @last_status_read = state[:last_status_read] || 0
+      refresh_frequencies! unless state[:channel_frequency] && state[:operator_frequency]
     end
 
     def restore_render_references(state)
@@ -815,8 +857,10 @@ module MegaDrive
       @key_mask = state[:key_mask]
       @fnum = state[:fnum]
       @block = state[:block]
+      @channel_frequency = state[:channel_frequency]
       @operator_fnum = state[:operator_fnum]
       @operator_block = state[:operator_block]
+      @operator_frequency = state[:operator_frequency]
       @algorithm = state[:algorithm]
       @feedback = state[:feedback]
       @pan_l = state[:pan_l]
