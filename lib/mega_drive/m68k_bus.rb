@@ -121,7 +121,7 @@ module MegaDrive
       trace_sram("read8 ctrl #{hex24(address)} -> open") if sram_control_range?(address)
       return z80_bus_request_status if z80_bus_request_address?(address)
       return @z80_reset_asserted ? 0 : 1 if z80_reset_address?(address)
-      return read_z80_ram(address) if z80_ram_mirror_address?(address)
+      return can_access_z80_bus? ? read_z80_ram(address) : 0xFF if z80_ram_mirror_address?(address)
       if @cartridge_override
         override = @cartridge_override.read_byte(address)
         return override unless override.nil?
@@ -143,7 +143,7 @@ module MegaDrive
       return @vdp.read_data if vdp_data_address?(address)
       return @vdp.read_control if vdp_control_address?(address)
       return @vdp.read_hv_counter if vdp_hv_counter_address?(address)
-      return mirrored_z80_word(address) if z80_ram_mirror_address?(address)
+      return can_access_z80_bus? ? mirrored_z80_word(address) : 0xFFFF if z80_ram_mirror_address?(address)
       if @cartridge_override
         override = @cartridge_override.read_word(address)
         return override unless override.nil?
@@ -211,9 +211,10 @@ module MegaDrive
         @z80_reset_asserted = (value & 0x01).zero?
         if @z80_reset_asserted
           @z80_cpu&.reset
-          @ym2612&.reset
         end
       elsif z80_ram_mirror_address?(address)
+        return unless can_access_z80_bus?
+
         write_z80_ram(address, value)
       elsif z80_bank_register_address?(address)
         @z80_bus&.write_byte(0x6000, value)
@@ -251,8 +252,9 @@ module MegaDrive
       elsif default_sram_window?(address)
         trace_sram("write16 default-sram-window #{hex24(address)} <= #{hex16(value)} mapped=#{@sram_enabled}")
       elsif z80_ram_mirror_address?(address)
-        write_z80_ram(address, (value >> 8) & 0xFF)
-        write_z80_ram(address + 1, value & 0xFF)
+        return unless can_access_z80_bus?
+
+        write_z80_ram(address & ~1, (value >> 8) & 0xFF)
         return
       elsif @cartridge_override&.write_word(address, value)
         return
@@ -269,6 +271,16 @@ module MegaDrive
     end
 
     def write_long(address, value)
+      address &= ADDRESS_MASK
+      value &= 0xFFFF_FFFF
+      if z80_ram_mirror_address?(address)
+        return unless can_access_z80_bus?
+
+        aligned = address & ~1
+        write_z80_ram(aligned, (value >> 24) & 0xFF)
+        write_z80_ram(aligned + 2, (value >> 8) & 0xFF)
+        return
+      end
       if sram_lock_span_address?(address & ADDRESS_MASK, 4)
         trace_sram("write32 lock #{hex24(address)} <= #{hex32(value)}")
         set_sram_enabled((value & 0x01) != 0)
@@ -459,12 +471,16 @@ module MegaDrive
       @z80_bus_requested ? 0 : 1
     end
 
+    def can_access_z80_bus?
+      @z80_bus_requested
+    end
+
     def read_z80_ram(address)
       @z80_bus.read_byte(address & 0x1FFF)
     end
 
     def mirrored_z80_word(address)
-      value = read_z80_ram(address)
+      value = read_z80_ram((address & 1).zero? ? address : address + 1)
       (value << 8) | value
     end
 

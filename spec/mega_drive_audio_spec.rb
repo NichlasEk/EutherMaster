@@ -302,6 +302,7 @@ RSpec.describe 'Mega Drive audio' do
 
   it 'maps 68k-side byte writes into mirrored Z80 RAM' do
     emulator = MegaDrive::Emulator.new
+    emulator.bus.write_word(0xA11100, 0x0100)
 
     emulator.bus.write_byte(0xA00000, 0x3E)
     emulator.bus.write_byte(0xA02001, 0xA0)
@@ -312,26 +313,52 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
     expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
     expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
+    expect(emulator.bus.read_word(0xA00000)).to eq(0x3E3E)
+    expect(emulator.bus.read_word(0xA00001)).to eq(0x3232)
   end
 
-  it 'maps 68k-side word writes into both Z80 RAM bytes' do
+  it 'maps 68k-side word writes into the Z80 RAM UDS byte lane' do
     emulator = MegaDrive::Emulator.new
+    emulator.bus.write_word(0xA11100, 0x0100)
 
     emulator.bus.write_word(0xA00000, 0x3EA0)
     emulator.bus.write_word(0xA00002, 0x3200)
 
     expect(emulator.z80_bus.read_byte(0x0000)).to eq(0x3E)
-    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0xA0)
+    expect(emulator.z80_bus.read_byte(0x0001)).to eq(0x00)
     expect(emulator.z80_bus.read_byte(0x0002)).to eq(0x32)
     expect(emulator.z80_bus.read_byte(0x0003)).to eq(0x00)
   end
 
-  it 'maps 68k-side long writes into consecutive Z80 RAM bytes' do
+  it 'aligns odd 68k-side Z80 RAM word writes to the UDS byte lane' do
     emulator = MegaDrive::Emulator.new
+    emulator.bus.write_word(0xA11100, 0x0100)
+
+    emulator.bus.write_word(0xA00011, 0xABCD)
+
+    expect(emulator.z80_bus.read_byte(0x0010)).to eq(0xAB)
+    expect(emulator.z80_bus.read_byte(0x0011)).to eq(0x00)
+  end
+
+  it 'maps 68k-side long writes into the Z80 RAM UDS byte lanes' do
+    emulator = MegaDrive::Emulator.new
+    emulator.bus.write_word(0xA11100, 0x0100)
 
     emulator.bus.write_long(0xA00010, 0x12345678)
 
-    expect((0...4).map { |offset| emulator.z80_bus.read_byte(0x0010 + offset) }).to eq([0x12, 0x34, 0x56, 0x78])
+    expect((0...4).map { |offset| emulator.z80_bus.read_byte(0x0010 + offset) }).to eq([0x12, 0x00, 0x56, 0x00])
+  end
+
+  it 'blocks 68k-side Z80 RAM writes after the bus is released' do
+    emulator = MegaDrive::Emulator.new
+    emulator.bus.write_word(0xA11100, 0x0100)
+    emulator.bus.write_byte(0xA010C0, 0x21)
+
+    emulator.bus.write_word(0xA11100, 0x0000)
+    emulator.bus.write_word(0xA010C0, 0x0000)
+
+    expect(emulator.z80_bus.read_byte(0x10C0)).to eq(0x21)
+    expect(emulator.bus.read_word(0xA010C0)).to eq(0xFFFF)
   end
 
   it 'leaves Mega Drive Z80 I/O ports unwired' do
@@ -364,8 +391,10 @@ RSpec.describe 'Mega Drive audio' do
       0xFB,             # EI
       0xC9              # RET
     ]
+    emulator.bus.write_word(0xA11100, 0x0100)
     program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
     isr.each_with_index { |byte, index| emulator.bus.write_byte(0xA00038 + index, byte) }
+    emulator.bus.write_word(0xA11100, 0x0000)
     emulator.bus.write_byte(0xA11200, 0x01)
 
     4.times do
@@ -385,7 +414,9 @@ RSpec.describe 'Mega Drive audio' do
       0x32, 0x01, 0x40, # LD ($4001),A
       0x76              # HALT
     ]
+    emulator.bus.write_word(0xA11100, 0x0100)
     program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
+    emulator.bus.write_word(0xA11100, 0x0000)
 
     emulator.bus.write_byte(0xA11200, 0x01)
     emulator.bus.run_z80_cycles(80)
@@ -404,7 +435,9 @@ RSpec.describe 'Mega Drive audio' do
       0x32, 0x11, 0x7F, # LD ($7F11),A
       0x76              # HALT
     ]
+    emulator.bus.write_word(0xA11100, 0x0100)
     program.each_with_index { |byte, index| emulator.bus.write_byte(0xA00000 + index, byte) }
+    emulator.bus.write_word(0xA11100, 0x0000)
     emulator.bus.write_byte(0xA11200, 0x01)
     emulator.bus.frame_cycle = 1_000
     emulator.bus.ym_frame_cycle = 2_000
@@ -477,14 +510,14 @@ RSpec.describe 'Mega Drive audio' do
     expect(emulator.z80_cpu.pc).to eq(0)
   end
 
-  it 'resets the YM2612 when the Z80 reset line is asserted' do
+  it 'keeps YM2612 state when only the Z80 reset line is asserted' do
     emulator = MegaDrive::Emulator.new
     emulator.ym2612.write_address_1(0xA0)
     emulator.ym2612.write_data(0x34)
 
     emulator.bus.write_byte(0xA11200, 0x00)
 
-    expect(emulator.ym2612.registers[0][0xA0]).to eq(0)
+    expect(emulator.ym2612.registers[0][0xA0]).to eq(0x34)
   end
 
   it 'routes 68k-side VDP ports to the Mega Drive VDP' do
