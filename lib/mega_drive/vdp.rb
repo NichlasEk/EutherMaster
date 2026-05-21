@@ -499,7 +499,8 @@ module MegaDrive
           row_b = sy_b & 7
           row_b = 7 - row_b if (entry_b & 0x1000) != 0
           col_b = sx_b & 7
-          col_b = 7 - col_b if (entry_b & 0x0800) != 0
+          hflip_b = (entry_b & 0x0800) != 0
+          col_b = 7 - col_b if hflip_b
           key_b = ((entry_b & 0x07FF) << 3) | row_b
           packed_b = pattern_cache[key_b]
           unless packed_b
@@ -510,8 +511,8 @@ module MegaDrive
                        (vram[(tile_b + 3) & 0xFFFF] || 0)
             pattern_cache[key_b] = packed_b
           end
-          step_b = (entry_b & 0x0800) != 0 ? -1 : 1
-          limit_b = step_b.positive? ? 8 - col_b : col_b + 1
+          step_b = hflip_b ? -1 : 1
+          limit_b = hflip_b ? col_b + 1 : 8 - col_b
           attr_b = ((entry_b & 0x8000) != 0 ? 0x100 : 0) | ((entry_b >> 9) & 0x30)
 
           sy_a = sy_a_row || ((screen_y + v_scroll_a[column]) & map_height_mask)
@@ -523,7 +524,8 @@ module MegaDrive
           row_a = sy_a & 7
           row_a = 7 - row_a if (entry_a & 0x1000) != 0
           col_a = sx_a & 7
-          col_a = 7 - col_a if (entry_a & 0x0800) != 0
+          hflip_a = (entry_a & 0x0800) != 0
+          col_a = 7 - col_a if hflip_a
           key_a = ((entry_a & 0x07FF) << 3) | row_a
           packed_a = pattern_cache[key_a]
           unless packed_a
@@ -534,8 +536,8 @@ module MegaDrive
                        (vram[(tile_a + 3) & 0xFFFF] || 0)
             pattern_cache[key_a] = packed_a
           end
-          step_a = (entry_a & 0x0800) != 0 ? -1 : 1
-          limit_a = step_a.positive? ? 8 - col_a : col_a + 1
+          step_a = hflip_a ? -1 : 1
+          limit_a = hflip_a ? col_a + 1 : 8 - col_a
           attr_a = ((entry_a & 0x8000) != 0 ? 0x100 : 0) | ((entry_a >> 9) & 0x30)
 
           run = width - screen_x
@@ -671,6 +673,8 @@ module MegaDrive
       v_flip = (attr & 0x1000) != 0
       palette = (attr >> 9) & 0x30
       priority = (attr & 0x8000) != 0
+      priority_bit = priority ? 0x100 : 0
+      sprite_base = priority_bit | palette
       width = @screen_width
       height = @screen_height
 
@@ -692,11 +696,19 @@ module MegaDrive
 
         sx = sx_start
         while sx < sx_end
-          x = screen_x + sx
           tile_x = sx >> 3
           col = sx & 7
-          tile_x = h_cells - 1 - tile_x if h_flip
-          col = 7 - col if h_flip
+          if h_flip
+            tile_x = h_cells - 1 - tile_x
+            col = 7 - col
+            step = -1
+            run = col + 1
+          else
+            step = 1
+            run = 8 - col
+          end
+          remaining = sx_end - sx
+          run = remaining if remaining < run
           tile = pattern + tile_x * v_cells + tile_y
           key = (tile << 3) | row
           packed = pattern_cache[key]
@@ -708,18 +720,27 @@ module MegaDrive
                      (vram[(tile_address + 3) & 0xFFFF] || 0)
             pattern_cache[key] = packed
           end
-          pixel = (packed >> ((7 - col) * 4)) & 0x0F
-          if pixel != 0
-            index = row_offset + x
-            unless occupied[index] == stamp
-              current = framebuffer[index] || 0
-              if priority || (current & 0x100).zero?
-                framebuffer[index] = (priority ? 0x100 : 0) | palette | pixel
+
+          unless packed.zero?
+            shift = (7 - col) * 4
+            shift_step = -4 * step
+            index = row_offset + screen_x + sx
+            run_index = 0
+            while run_index < run
+              pixel = (packed >> shift) & 0x0F
+              if pixel != 0 && occupied[index] != stamp
+                current = framebuffer[index] || 0
+                if priority || (current & 0x100).zero?
+                  framebuffer[index] = sprite_base | pixel
+                end
+                occupied[index] = stamp
               end
-              occupied[index] = stamp
+              shift += shift_step
+              index += 1
+              run_index += 1
             end
           end
-          sx += 1
+          sx += run
         end
         sy += 1
       end
