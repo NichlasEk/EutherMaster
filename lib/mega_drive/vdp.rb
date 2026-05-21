@@ -422,7 +422,7 @@ module MegaDrive
       sprites = sprite_pixels
       height = @screen_height
       width = @screen_width
-      drew = false
+      drew = true
       height.times do |screen_y|
         source_y = @source_y_cache[screen_y]
         row_offset = screen_y * width
@@ -439,7 +439,6 @@ module MegaDrive
           next unless pixel
 
           @framebuffer[row_offset + screen_x] = pixel & 0x3F
-          drew = true
         end
       end
       drew
@@ -478,7 +477,7 @@ module MegaDrive
       v_scroll_b = @v_scroll_b_cache
       v_scroll_a_single = @v_scroll_a_single_cache
       v_scroll_b_single = @v_scroll_b_single_cache
-      drew = false
+      drew = true
       backdrop = color_index(@registers[7] & 0x3F)
 
       screen_y = 0
@@ -565,7 +564,6 @@ module MegaDrive
               index += 1
               run_index += 1
             end
-            drew = true
           elsif packed_b.zero? || (attr_a & 0x100) != 0
             while run_index < run
               color_a = (packed_a >> shift_a) & 0x0F
@@ -574,7 +572,6 @@ module MegaDrive
               index += 1
               run_index += 1
             end
-            drew = true
           else
             while run_index < run
               color_b = (packed_b >> shift_b) & 0x0F
@@ -586,10 +583,8 @@ module MegaDrive
                 else
                   framebuffer[index] = attr_b | color_b
                 end
-                drew = true
               elsif color_b != 0
                 framebuffer[index] = attr_b | color_b
-                drew = true
               else
                 framebuffer[index] = backdrop
               end
@@ -911,20 +906,60 @@ module MegaDrive
       @source_x_cache = source_cache(@source_x_cache, @screen_width, width)
       @source_y_cache = source_cache(@source_y_cache, @screen_height, height)
       @plane_dimensions_cache = plane_dimensions
-      @h_scroll_a_cache = Array.new(height) { |y| h_scroll_value(:a, y) }
-      @h_scroll_b_cache = Array.new(height) { |y| h_scroll_value(:b, y) }
+      @h_scroll_a_cache = fill_h_scroll_cache(@h_scroll_a_cache, height, :a)
+      @h_scroll_b_cache = fill_h_scroll_cache(@h_scroll_b_cache, height, :b)
       columns = (width + 15) / 16
-      @v_scroll_a_cache = Array.new(columns) { |column| v_scroll_value_for_column(:a, column) }
-      @v_scroll_b_cache = Array.new(columns) { |column| v_scroll_value_for_column(:b, column) }
+      @v_scroll_a_cache = fill_v_scroll_cache(@v_scroll_a_cache, columns, :a)
+      @v_scroll_b_cache = fill_v_scroll_cache(@v_scroll_b_cache, columns, :b)
       @v_scroll_a_single_cache = single_value(@v_scroll_a_cache)
       @v_scroll_b_single_cache = single_value(@v_scroll_b_cache)
-      @window_range_cache = Array.new(height) { |y| window_range(y) }
-      @window_enabled_cache = @window_range_cache.any? { |range| range && range[1] > range[0] }
-      @window_pixel_count_cache = @window_range_cache.sum { |range| range && range[1] > range[0] ? range[1] - range[0] : 0 }
+      prepare_window_cache(height, width)
       unless @pattern_row_cache_packed && @pattern_row_cache&.length == 0x800 * 8
         @pattern_row_cache = Array.new(0x800 * 8)
         @pattern_row_cache_packed = true
       end
+    end
+
+    def fill_h_scroll_cache(cache, height, plane)
+      cache = Array.new(height, 0) unless cache&.length == height
+      y = 0
+      while y < height
+        cache[y] = h_scroll_value(plane, y)
+        y += 1
+      end
+      cache
+    end
+
+    def fill_v_scroll_cache(cache, columns, plane)
+      cache = Array.new(columns, 0) unless cache&.length == columns
+      column = 0
+      while column < columns
+        cache[column] = v_scroll_value_for_column(plane, column)
+        column += 1
+      end
+      cache
+    end
+
+    def prepare_window_cache(height, width)
+      cache = @window_range_cache
+      cache = Array.new(height) unless cache&.length == height
+      enabled = false
+      pixels = 0
+      y = 0
+      while y < height
+        range = window_range(y)
+        if range[1] > range[0]
+          cache[y] = range
+          enabled = true
+          pixels += range[1] - range[0]
+        else
+          cache[y] = nil
+        end
+        y += 1
+      end
+      @window_range_cache = cache
+      @window_enabled_cache = enabled
+      @window_pixel_count_cache = pixels
     end
 
     def invalidate_pattern_row(address)

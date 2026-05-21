@@ -2,9 +2,9 @@ module MegaDrive
   class Audio
     CLOCK = MegaDrive::PSG::CLOCK
     SAMPLE_RATE = 44_100
-    PSG_GAIN = 0.35
-    YM_GAIN = 0.75
-    PSG_FILTER_ALPHA = ENV.fetch('ASTRAL_MD_PSG_FILTER', '0.28').to_f.clamp(0.05, 1.0)
+    PSG_GAIN = ENV.fetch('ASTRAL_MD_PSG_GAIN', '0.28').to_f.clamp(0.0, 1.0)
+    YM_GAIN = ENV.fetch('ASTRAL_MD_YM_GAIN', '0.86').to_f.clamp(0.0, 1.2)
+    PSG_FILTER_ALPHA = ENV.fetch('ASTRAL_MD_PSG_FILTER', '0.22').to_f.clamp(0.05, 1.0)
     PSG_DC_ALPHA = ENV.fetch('ASTRAL_MD_PSG_DC_FILTER', '0.01').to_f.clamp(0.001, 0.05)
     PSG_DC_INTERVAL = 8
     YM_FRAME_CYCLES = 127_800.0
