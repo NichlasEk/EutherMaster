@@ -179,6 +179,26 @@ RSpec.describe MegaDrive::M68K do
     expect(bus.read_byte(0xFF009E)).to eq(0)
   end
 
+  it 'does not misdecode absolute-destination MOVE.W as postincrement' do
+    reset_to(0x100)
+    load_program(0x100, [
+      0x33D8, 0x0000, 0x0200, # MOVE.W (A0)+,$00000200.l
+      0x4E71
+    ])
+    cpu.instance_variable_get(:@a)[0] = 0x00FF_0100
+    cpu.instance_variable_get(:@a)[1] = 0x00FF_0300
+    bus.write_word(0x00FF_0100, 0x5A5A)
+    bus.write_word(0x00FF_0300, 0x1111)
+
+    cpu.step
+
+    expect(cpu.pc).to eq(0x106)
+    expect(cpu.a[0]).to eq(0x00FF_0102)
+    expect(cpu.a[1]).to eq(0x00FF_0300)
+    expect(bus.read_word(0x0200)).to eq(0x5A5A)
+    expect(bus.read_word(0x00FF_0300)).to eq(0x1111)
+  end
+
   it 'jumps and calls through absolute long addresses' do
     reset_to(0x100)
     load_program(0x100, [0x4EB9, 0x0000, 0x0200, 0x7001])

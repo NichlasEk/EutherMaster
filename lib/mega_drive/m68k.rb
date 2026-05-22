@@ -123,7 +123,7 @@ module MegaDrive
         fast_work_ram_move_a0_to_a1(SIZE_LONG, dest_postinc: false)
       when 0x3298
         fast_work_ram_move_a0_to_a1(SIZE_WORD, dest_postinc: false)
-      when 0x33D8
+      when 0x32D8
         fast_work_ram_move_a0_to_a1(SIZE_WORD, dest_postinc: true)
       else
         return fast_lea_d16_an(opcode) if (opcode & 0xF1F8) == 0x41E8
@@ -279,7 +279,7 @@ module MegaDrive
       unless @bus.respond_to?(:work_ram_fast_address?) &&
              @bus.work_ram_fast_address?(source, bytes) &&
              @bus.work_ram_fast_address?(dest, bytes)
-        return move(size == SIZE_LONG ? 0x2298 : (dest_postinc ? 0x33D8 : 0x3298))
+        return move(size == SIZE_LONG ? 0x2298 : (dest_postinc ? 0x32D8 : 0x3298))
       end
 
       value = if size == SIZE_LONG

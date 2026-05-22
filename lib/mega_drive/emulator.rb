@@ -114,6 +114,14 @@ module MegaDrive
           @bus.frame_cycle = z80_clock
           @bus.ym_frame_cycle = cycles
           z80_pending = drain_z80_pending(z80_pending)
+          if @vdp.memory_to_vram_dma_active?
+            dma_wait_cycles = @vdp.drain_memory_to_vram_dma
+            cycles += dma_wait_cycles
+            z80_pending += dma_wait_cycles * M68KBus::M68K_TO_Z80_CYCLE_RATIO
+            z80_clock = cycles * M68KBus::M68K_TO_Z80_CYCLE_RATIO
+            @bus.frame_cycle = z80_clock
+            @bus.ym_frame_cycle = cycles
+          end
           steps += 1
         rescue NotImplementedError
           break

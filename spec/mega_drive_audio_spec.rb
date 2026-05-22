@@ -681,6 +681,7 @@ RSpec.describe 'Mega Drive audio' do
     bus.write_word(0xC00004, 0x9700) # memory-to-VRAM/CRAM
     bus.write_word(0xC00004, 0xC000) # CRAM write address 0
     bus.write_word(0xC00004, 0x0080) # DMA start
+    vdp.drain_memory_to_vram_dma
 
     expect(vdp.cram[0]).to eq(0x000E)
     expect(vdp.cram[1]).to eq(0x00E0)

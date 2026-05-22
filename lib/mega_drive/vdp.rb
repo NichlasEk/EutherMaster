@@ -11,6 +11,7 @@ module MegaDrive
     TOTAL_LINES = 262
     FRAME_CYCLES = LINE_CYCLES * TOTAL_LINES
     VBLANK_START_CYCLE = LINE_CYCLES * VISIBLE_LINES
+    DEFER_MEMORY_DMA = ENV.fetch('ASTRAL_MD_DEFER_DMA', '1') == '1'
 
     attr_reader :registers, :vram, :cram, :vsram, :framebuffer, :render_version,
                 :screen_width, :screen_height
@@ -43,6 +44,9 @@ module MegaDrive
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
       @vblank_counter_pending = false
+      @pending_vdp_writes = []
+      @draining_dma = false
+      @flushing_pending_vdp_writes = false
     end
 
     def reset
@@ -72,6 +76,9 @@ module MegaDrive
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
       @vblank_counter_pending = false
+      @pending_vdp_writes = []
+      @draining_dma = false
+      @flushing_pending_vdp_writes = false
     end
 
     def read_data
@@ -108,28 +115,17 @@ module MegaDrive
       @control_pending = false
       value &= 0xFFFF
 
+      if buffer_vdp_write_during_dma?
+        pending_vdp_writes << [:data, value]
+        return
+      end
+
       if @dma_active && dma_mode == 0x80
         perform_vram_fill(value)
         return
       end
 
-      case memory_target
-      when :cram
-        index = (@address >> 1) & (CRAM_SIZE - 1)
-        value &= 0x0FFF
-        @video_dirty = true if @cram[index] != value
-        @cram[index] = value
-        @palette_version = -1
-      when :vsram
-        index = (@address >> 1) & (VSRAM_SIZE - 1)
-        value &= 0x07FF
-        @video_dirty = true if @vsram[index] != value
-        @vsram[index] = value
-      else
-        write_vram_word(@address, value)
-      end
-
-      increment_address
+      write_data_direct(value)
     end
 
     def write_data_byte(address, value)
@@ -138,6 +134,11 @@ module MegaDrive
 
     def write_control(value)
       value &= 0xFFFF
+
+      if buffer_vdp_write_during_dma?
+        pending_vdp_writes << [:control, value]
+        return
+      end
 
       if @control_pending
         @address = (@control_latch & 0x3FFF) | ((value & 0x0007) << 14)
@@ -165,6 +166,29 @@ module MegaDrive
 
     def write_control_byte(address, value)
       write_control((value & 0xFF) * 0x0101)
+    end
+
+    def memory_to_vram_dma_active?
+      DEFER_MEMORY_DMA && @dma_active && dma_mode < 0x80
+    end
+
+    def drain_memory_to_vram_dma
+      return 0 unless memory_to_vram_dma_active?
+
+      length = dma_length
+      @draining_dma = true
+      begin
+        length.times do
+          write_data_direct(@bus.read_word(dma_source_address))
+          increment_dma_source_address
+          decrement_dma_length
+        end
+      ensure
+        @draining_dma = false
+      end
+      @dma_active = false
+      flush_pending_vdp_writes
+      length * 2
     end
 
     def render_frame
@@ -198,6 +222,47 @@ module MegaDrive
     end
 
     private
+
+    def write_data_direct(value)
+      case memory_target
+      when :cram
+        index = (@address >> 1) & (CRAM_SIZE - 1)
+        value &= 0x0FFF
+        @video_dirty = true if @cram[index] != value
+        @cram[index] = value
+        @palette_version = -1
+      when :vsram
+        index = (@address >> 1) & (VSRAM_SIZE - 1)
+        value &= 0x07FF
+        @video_dirty = true if @vsram[index] != value
+        @vsram[index] = value
+      else
+        write_vram_word(@address, value)
+      end
+
+      increment_address
+    end
+
+    def pending_vdp_writes
+      @pending_vdp_writes ||= []
+    end
+
+    def buffer_vdp_write_during_dma?
+      memory_to_vram_dma_active? && !@draining_dma && !@flushing_pending_vdp_writes
+    end
+
+    def flush_pending_vdp_writes
+      return if pending_vdp_writes.empty?
+
+      writes = pending_vdp_writes.dup
+      pending_vdp_writes.clear
+      @flushing_pending_vdp_writes = true
+      writes.each do |type, value|
+        type == :control ? write_control(value) : write_data(value)
+      end
+    ensure
+      @flushing_pending_vdp_writes = false
+    end
 
     def rebuild_palettes
       @palette_rgba = Array.new(CRAM_SIZE) { |index| md_color_rgba(@cram[index] || 0) }
@@ -293,16 +358,19 @@ module MegaDrive
     def perform_dma
       return unless @bus
       return perform_vram_copy if dma_mode == 0xC0
+      return if dma_mode == 0x80
       return unless dma_mode < 0x80
+      return if DEFER_MEMORY_DMA
 
       source = dma_source_address
       length = dma_length
       length.times do
-        write_data(@bus.read_word(source))
+        write_data_direct(@bus.read_word(source))
         increment_dma_source_address
         decrement_dma_length
         source = dma_source_address
       end
+
       @dma_active = false
     end
 
