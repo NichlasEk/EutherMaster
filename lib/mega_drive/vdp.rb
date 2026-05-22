@@ -490,31 +490,6 @@ module MegaDrive
         screen_x = 0
         while screen_x < width
           column = screen_x >> 4
-          sy_b = sy_b_row || ((screen_y + v_scroll_b[column]) & map_height_mask)
-          sx_b = (screen_x - hb) & map_width_mask
-          cell_y_b = sy_b >> 3
-          cell_x_b = sx_b >> 3
-          address_b = (plane_b + ((2 * (cell_y_b * width_cells + cell_x_b)) & 0x1FFF)) & 0xFFFF
-          entry_b = ((vram[address_b] || 0) << 8) | (vram[(address_b ^ 1) & 0xFFFF] || 0)
-          row_b = sy_b & 7
-          row_b = 7 - row_b if (entry_b & 0x1000) != 0
-          col_b = sx_b & 7
-          hflip_b = (entry_b & 0x0800) != 0
-          col_b = 7 - col_b if hflip_b
-          key_b = ((entry_b & 0x07FF) << 3) | row_b
-          packed_b = pattern_cache[key_b]
-          unless packed_b
-            tile_b = (entry_b & 0x07FF) * 32 + row_b * 4
-            packed_b = ((vram[tile_b & 0xFFFF] || 0) << 24) |
-                       ((vram[(tile_b + 1) & 0xFFFF] || 0) << 16) |
-                       ((vram[(tile_b + 2) & 0xFFFF] || 0) << 8) |
-                       (vram[(tile_b + 3) & 0xFFFF] || 0)
-            pattern_cache[key_b] = packed_b
-          end
-          step_b = hflip_b ? -1 : 1
-          limit_b = hflip_b ? col_b + 1 : 8 - col_b
-          attr_b = ((entry_b & 0x8000) != 0 ? 0x100 : 0) | ((entry_b >> 9) & 0x30)
-
           sy_a = sy_a_row || ((screen_y + v_scroll_a[column]) & map_height_mask)
           sx_a = (screen_x - ha) & map_width_mask
           cell_y_a = sy_a >> 3
@@ -544,6 +519,56 @@ module MegaDrive
           column_run = 16 - (screen_x & 15)
           run = column_run if column_run < run
           run = limit_a if limit_a < run
+
+          if (attr_a & 0x100) != 0 && !packed_a.zero?
+            priority_run = run
+            priority_index = row_offset + screen_x
+            priority_shift = (7 - col_a) * 4
+            priority_shift_step = -4 * step_a
+            priority_i = 0
+            while priority_i < priority_run
+              color_a = (packed_a >> priority_shift) & 0x0F
+              break if color_a.zero?
+
+              framebuffer[priority_index] = attr_a | color_a
+              priority_shift += priority_shift_step
+              priority_index += 1
+              priority_i += 1
+            end
+            if priority_i == priority_run
+              screen_x += priority_run
+              next
+            elsif priority_i.positive?
+              screen_x += priority_i
+              next
+            end
+          end
+
+          sy_b = sy_b_row || ((screen_y + v_scroll_b[column]) & map_height_mask)
+          sx_b = (screen_x - hb) & map_width_mask
+          cell_y_b = sy_b >> 3
+          cell_x_b = sx_b >> 3
+          address_b = (plane_b + ((2 * (cell_y_b * width_cells + cell_x_b)) & 0x1FFF)) & 0xFFFF
+          entry_b = ((vram[address_b] || 0) << 8) | (vram[(address_b ^ 1) & 0xFFFF] || 0)
+          row_b = sy_b & 7
+          row_b = 7 - row_b if (entry_b & 0x1000) != 0
+          col_b = sx_b & 7
+          hflip_b = (entry_b & 0x0800) != 0
+          col_b = 7 - col_b if hflip_b
+          key_b = ((entry_b & 0x07FF) << 3) | row_b
+          packed_b = pattern_cache[key_b]
+          unless packed_b
+            tile_b = (entry_b & 0x07FF) * 32 + row_b * 4
+            packed_b = ((vram[tile_b & 0xFFFF] || 0) << 24) |
+                       ((vram[(tile_b + 1) & 0xFFFF] || 0) << 16) |
+                       ((vram[(tile_b + 2) & 0xFFFF] || 0) << 8) |
+                       (vram[(tile_b + 3) & 0xFFFF] || 0)
+            pattern_cache[key_b] = packed_b
+          end
+          step_b = hflip_b ? -1 : 1
+          limit_b = hflip_b ? col_b + 1 : 8 - col_b
+          attr_b = ((entry_b & 0x8000) != 0 ? 0x100 : 0) | ((entry_b >> 9) & 0x30)
+
           run = limit_b if limit_b < run
 
           run_index = 0

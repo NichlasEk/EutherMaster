@@ -125,6 +125,7 @@ module AstralVerse
     attach_function :render_texture, :SDL_RenderTexture, [:pointer, :pointer, :pointer, FRect.by_ref], :bool
     attach_function :create_texture_from_surface, :SDL_CreateTextureFromSurface, [:pointer, :pointer], :pointer
     attach_function :set_texture_scale_mode, :SDL_SetTextureScaleMode, [:pointer, :int], :bool
+    attach_function :set_texture_blend_mode, :SDL_SetTextureBlendMode, [:pointer, :uint32], :bool
     attach_function :destroy_surface, :SDL_DestroySurface, [:pointer], :void
 
     attach_function :poll_event, :SDL_PollEvent, [:pointer], :bool

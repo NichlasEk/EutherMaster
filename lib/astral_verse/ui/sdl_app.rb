@@ -197,6 +197,7 @@ module AstralVerse
         close_gamepads
         @text_cache&.each_value { |texture| SDL3.destroy_texture(texture[:ptr]) }
         @fonts&.each_value { |font| SDL3TTF.close_font(font) }
+        SDL3.destroy_texture(@scanline_texture) if @scanline_texture && !@scanline_texture.null?
         SDL3.destroy_texture(@screen_texture) if @screen_texture && !@screen_texture.null?
         SDL3.destroy_renderer(@renderer) if @renderer && !@renderer.null?
         SDL3.destroy_window(@window) if @window && !@window.null?
@@ -469,12 +470,17 @@ module AstralVerse
         return unless delta >= frame_ms && @running
 
         if @stone.instance_variable_get(:@codex_present)
-          sync_game_input_state
-          @stone.gaze_frame
-          @audio_player&.update
-          @frame_count += 1
-          record_run_frame(now)
-          @last_vision = now
+          frames_due = (delta / frame_ms).floor
+          frames_due = MAX_CATCHUP_FRAMES if frames_due > MAX_CATCHUP_FRAMES
+          frames_due.times do
+            sync_game_input_state
+            @stone.gaze_frame
+            @audio_player&.update
+            @frame_count += 1
+            record_run_frame(now)
+          end
+          @last_vision += frames_due * frame_ms
+          @last_vision = now if @last_vision > now || now - @last_vision > frame_ms * MAX_CATCHUP_FRAMES
         else
           @running = false
         end
@@ -664,14 +670,9 @@ module AstralVerse
       end
 
       def draw_scanlines(viewport)
-        pixel_h = viewport[:h] / screen_height.to_f
-        line_h = [[pixel_h * 0.22, 1.0].max, pixel_h * 0.5].min
         alpha = (170 * @scanline_strength).round.clamp(0, 170)
-        y = viewport[:y] + pixel_h - line_h
-        while y < viewport[:y] + viewport[:h]
-          fill_rect(viewport[:x], y, viewport[:w], line_h, [0, 0, 0, alpha])
-          y += pixel_h
-        end
+        texture = scanline_texture(screen_height, alpha)
+        render_texture(texture, viewport[:x], viewport[:y], viewport[:w], viewport[:h])
       end
 
       def draw_status
@@ -1128,13 +1129,12 @@ module AstralVerse
         width = screen_width
         height = screen_height
         ensure_screen_texture(width, height)
-        @frame_rgba.clear
         if @sharp_pixels
-          append_edge_sharpened_frame(framebuffer, width, height)
+          write_edge_sharpened_frame(framebuffer, width, height)
         else
-          append_raw_frame(framebuffer, width, height)
+          write_raw_frame(framebuffer, width, height)
         end
-        @frame_pixels.put_bytes(0, @frame_rgba)
+        @frame_pixels.put_array_of_uint32(0, @frame_words)
         SDL3.update_texture(@screen_texture, nil, @frame_pixels, width * 4)
         @last_uploaded_render_version = render_version
       end
@@ -1148,8 +1148,31 @@ module AstralVerse
         SDL3.set_texture_scale_mode(@screen_texture, SDL3::SCALEMODE_NEAREST)
         @screen_texture_width = width
         @screen_texture_height = height
-        @frame_pixels = FFI::MemoryPointer.new(:uint8, width * height * 4)
-        @frame_rgba = String.new(capacity: width * height * 4, encoding: Encoding::BINARY)
+        @frame_pixel_count = width * height
+        @frame_pixels = FFI::MemoryPointer.new(:uint32, @frame_pixel_count)
+        @frame_words = Array.new(@frame_pixel_count, 0)
+        @scanline_texture_key = nil
+      end
+
+      def scanline_texture(height, alpha)
+        key = [height, alpha]
+        return @scanline_texture if @scanline_texture && !@scanline_texture.null? && @scanline_texture_key == key
+
+        SDL3.destroy_texture(@scanline_texture) if @scanline_texture && !@scanline_texture.null?
+        @scanline_texture = SDL3.check(SDL3.create_texture(@renderer, SDL3::PIXELFORMAT_RGBA32,
+          SDL3::TEXTUREACCESS_STREAMING, 1, height), 'SDL_CreateTexture scanlines')
+        SDL3.set_texture_scale_mode(@scanline_texture, SDL3::SCALEMODE_NEAREST)
+        SDL3.set_texture_blend_mode(@scanline_texture, SDL3::BLENDMODE_BLEND)
+        pixels = String.new(capacity: height * 4, encoding: Encoding::BINARY)
+        y = 0
+        while y < height
+          pixels << (y.odd? ? [0, 0, 0, alpha].pack('C4') : [0, 0, 0, 0].pack('C4'))
+          y += 1
+        end
+        pointer = FFI::MemoryPointer.from_string(pixels)
+        SDL3.update_texture(@scanline_texture, nil, pointer, 4)
+        @scanline_texture_key = key
+        @scanline_texture
       end
 
       def emulator_render_version
@@ -1163,19 +1186,21 @@ module AstralVerse
         end
       end
 
-      def append_raw_frame(framebuffer, width, height)
+      def write_raw_frame(framebuffer, width, height)
         pixel_count = width * height
         index = 0
-        palette = active_palette_rgba
+        words = @frame_words
+        palette = active_palette_words
         while index < pixel_count
-          @frame_rgba << palette[(framebuffer[index] || 0) & 0x3F]
+          words[index] = palette[(framebuffer[index] || 0) & 0x3F]
           index += 1
         end
       end
 
-      def append_edge_sharpened_frame(framebuffer, width, height)
-        normal = active_palette_rgba
-        sharp = active_sharp_palette_rgba
+      def write_edge_sharpened_frame(framebuffer, width, height)
+        normal = active_palette_words
+        sharp = active_sharp_palette_words
+        words = @frame_words
         last_x = width - 1
         last_y = height - 1
         y = 0
@@ -1187,7 +1212,7 @@ module AstralVerse
             color = (framebuffer[index] || 0) & 0x3F
             edge = (x < last_x && ((framebuffer[index + 1] || 0) & 0x3F) != color) ||
               (y < last_y && ((framebuffer[index + width] || 0) & 0x3F) != color)
-            @frame_rgba << (edge ? sharp[color] : normal[color])
+            words[index] = edge ? sharp[color] : normal[color]
             x += 1
           end
           y += 1
@@ -1202,6 +1227,23 @@ module AstralVerse
       def active_sharp_palette_rgba
         vdp = @stone.emulator.respond_to?(:vdp) ? @stone.emulator.vdp : nil
         vdp&.respond_to?(:sharp_palette_rgba) ? vdp.sharp_palette_rgba : @sharp_palette_rgba
+      end
+
+      def active_palette_words
+        palette_words(active_palette_rgba, :@palette_words_source, :@palette_words)
+      end
+
+      def active_sharp_palette_words
+        palette_words(active_sharp_palette_rgba, :@sharp_palette_words_source, :@sharp_palette_words)
+      end
+
+      def palette_words(palette, source_name, cache_name)
+        return instance_variable_get(cache_name) if instance_variable_get(source_name).equal?(palette)
+
+        words = palette.map { |rgba| rgba.unpack1('L<') }
+        instance_variable_set(source_name, palette)
+        instance_variable_set(cache_name, words)
+        words
       end
 
       def sharp_channel(value)
