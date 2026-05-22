@@ -43,6 +43,8 @@ module MegaDrive
       @z80_cpu = z80_cpu
       @vdp.bus = self if @vdp
       @rom = nil
+      @rom_length = 0
+      @rom_mask = nil
       @cartridge_override = nil
       @z80_bus_requested = false
       @z80_reset_asserted = true
@@ -61,6 +63,8 @@ module MegaDrive
     def load_rom(bytes)
       @rom = bytes.map { |byte| byte & 0xFF }.freeze
       @rom = nil if @rom.empty?
+      @rom_length = @rom&.length || 0
+      @rom_mask = @rom_length.positive? && (@rom_length & (@rom_length - 1)).zero? ? @rom_length - 1 : nil
       @cartridge_override = nil
       reset_sram
     end
@@ -133,7 +137,10 @@ module MegaDrive
         trace_sram("read8 ram #{hex24(address)} -> #{hex8(value)}") if trace_ram_address?(address)
         return value
       end
-      return @rom[address % @rom.length] if cartridge_rom_address?(address)
+      if cartridge_rom_address?(address)
+        ensure_rom_index_cache
+        return @rom[@rom_mask ? (address & @rom_mask) : (address % @rom_length)]
+      end
 
       @memory[address] & 0xFF
     end
@@ -177,6 +184,52 @@ module MegaDrive
       trace_sram("read32 ctrl #{hex24(address)} -> open") if sram_control_range?(address)
 
       ((read_word(address) << 16) | read_word(address + 2)) & 0xFFFF_FFFF
+    end
+
+    def read_byte_fast(address)
+      address &= ADDRESS_MASK
+      if address >= WORK_RAM_BASE
+        return @work_ram[address & WORK_RAM_MASK]
+      end
+      if @rom && address < 0x00A0_0000
+        ensure_rom_index_cache
+        return read_sram_byte(address) if @sram && @sram_enabled && address >= @sram_start && address <= @sram_end
+        if @cartridge_override
+          override = @cartridge_override.read_byte(address)
+          return override unless override.nil?
+        end
+        return @rom[@rom_mask ? (address & @rom_mask) : (address % @rom_length)]
+      end
+
+      read_byte(address)
+    end
+
+    def read_word_fast(address)
+      address &= ADDRESS_MASK
+      if address >= WORK_RAM_BASE
+        offset = address & WORK_RAM_MASK
+        return ((@work_ram[offset] << 8) | @work_ram[(offset + 1) & WORK_RAM_MASK]) & 0xFFFF
+      end
+      if @rom && address < 0x00A0_0000
+        ensure_rom_index_cache
+        if @sram && @sram_enabled && address >= @sram_start && ((address + 1) & ADDRESS_MASK) <= @sram_end
+          return ((read_sram_byte(address) << 8) | read_sram_byte(address + 1)) & 0xFFFF
+        end
+        if @cartridge_override
+          override = @cartridge_override.read_word(address)
+          return override unless override.nil?
+        end
+        if @rom_mask
+          return ((@rom[address & @rom_mask] << 8) | @rom[(address + 1) & @rom_mask]) & 0xFFFF
+        end
+        return ((@rom[address % @rom_length] << 8) | @rom[(address + 1) % @rom_length]) & 0xFFFF
+      end
+
+      read_word(address)
+    end
+
+    def read_long_fast(address)
+      ((read_word_fast(address) << 16) | read_word_fast(address + 2)) & 0xFFFF_FFFF
     end
 
     def write_byte(address, value)
@@ -485,8 +538,19 @@ module MegaDrive
     end
 
     def read_rom_word(address)
-      length = @rom.length
-      ((@rom[address % length] << 8) | @rom[(address + 1) % length]) & 0xFFFF
+      ensure_rom_index_cache
+      if @rom_mask
+        ((@rom[address & @rom_mask] << 8) | @rom[(address + 1) & @rom_mask]) & 0xFFFF
+      else
+        ((@rom[address % @rom_length] << 8) | @rom[(address + 1) % @rom_length]) & 0xFFFF
+      end
+    end
+
+    def ensure_rom_index_cache
+      return if @rom_length && @rom_length.positive?
+
+      @rom_length = @rom&.length || 0
+      @rom_mask = @rom_length.positive? && (@rom_length & (@rom_length - 1)).zero? ? @rom_length - 1 : nil
     end
 
     def read_work_ram_word(address)

@@ -19,6 +19,7 @@ module MegaDrive
 
     def initialize(bus)
       @bus = bus
+      @fast_bus = bus.respond_to?(:read_word_fast) ? bus : nil
       power_on
     end
 
@@ -1348,7 +1349,7 @@ module MegaDrive
     end
 
     def fetch_word
-      value = read_word(@pc)
+      value = @fast_bus ? @fast_bus.read_word_fast(@pc) : read_word(@pc)
       @pc = (@pc + 2) & ADDRESS_MASK
       value
     end
@@ -1526,15 +1527,24 @@ module MegaDrive
     end
 
     def read_byte(address)
-      @bus.read_byte(address & ADDRESS_MASK) & 0xFF
+      address &= ADDRESS_MASK
+      (@fast_bus ? @fast_bus.read_byte_fast(address) : @bus.read_byte(address)) & 0xFF
     end
 
     def read_word(address)
-      @bus.read_word(address & ADDRESS_MASK) & 0xFFFF
+      address &= ADDRESS_MASK
+      (@fast_bus ? @fast_bus.read_word_fast(address) : @bus.read_word(address)) & 0xFFFF
     end
 
     def read_long(address)
-      @bus.respond_to?(:read_long) ? @bus.read_long(address & ADDRESS_MASK) & 0xFFFF_FFFF : ((read_word(address) << 16) | read_word(address + 2))
+      address &= ADDRESS_MASK
+      if @fast_bus
+        @fast_bus.read_long_fast(address) & 0xFFFF_FFFF
+      elsif @bus.respond_to?(:read_long)
+        @bus.read_long(address) & 0xFFFF_FFFF
+      else
+        ((read_word(address) << 16) | read_word(address + 2)) & 0xFFFF_FFFF
+      end
     end
 
     def write_byte(address, value)
