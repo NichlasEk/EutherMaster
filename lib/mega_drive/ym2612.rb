@@ -198,7 +198,7 @@ module MegaDrive
       write_index = 0
       live_state = capture_render_references
       restore_render_state(@frame_start_state || capture_render_state)
-      samples = Array.new(count, 0.0)
+      samples = mono_sample_buffer(count)
       cycle_position = 0.0
       cycle_step = frame_cycles.to_f / count
       sample_step = 1.0 / sample_rate
@@ -244,7 +244,7 @@ module MegaDrive
       continuity = capture_audio_continuity_state if @async_audio_initialized
       restore_render_state(job[:start] || capture_render_state)
       restore_audio_continuity_state(continuity) if continuity
-      samples = Array.new(count, 0.0)
+      samples = mono_sample_buffer(count)
       cycle_position = 0.0
       cycle_step = frame_cycles.to_f / count
       sample_step = 1.0 / sample_rate
@@ -265,6 +265,14 @@ module MegaDrive
     end
 
     private
+
+    def mono_sample_buffer(count)
+      if @mono_sample_buffer && @mono_sample_buffer.length == count
+        @mono_sample_buffer
+      else
+        @mono_sample_buffer = Array.new(count, 0.0)
+      end
+    end
 
     def apply_register(port, reg, value)
       case reg

@@ -388,6 +388,11 @@ module AstralVerse
         @closed = false
         @last_pcm = 0
         @last_pcm_frame = []
+        @last_pcm_frame_length = 0
+        @pcm_buffer = []
+        @pcm_pointer = nil
+        @pad_buffer = []
+        @pad_pointer = nil
         prebuffer_silence
         SDL3.check(SDL3.resume_audio_stream_device(@stream), 'SDL_ResumeAudioStreamDevice')
       end
@@ -400,16 +405,11 @@ module AstralVerse
           SDL3.clear_audio_stream(@stream)
           queued = 0
         end
-        pcm = samples.map { |sample| (sample * gain * 32_000).clamp(-32_768, 32_767).to_i }
-        @last_pcm = pcm[-1] || @last_pcm
-        @last_pcm_frame = pcm unless pcm.empty?
-        pad_samples = low_water_samples - (queued / BYTES_PER_SAMPLE) - pcm.length
-        if pad_samples.positive?
-          data = (pcm + loop_pcm(pad_samples)).pack('s<*')
-        else
-          data = pcm.pack('s<*')
-        end
-        SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData')
+        pcm_count = samples.length
+        pcm = fill_pcm_buffer(samples, gain, pcm_count)
+        write_pcm_buffer(pcm, pcm_count, 'SDL_PutAudioStreamData') if pcm_count.positive?
+        pad_samples = low_water_samples - (queued / BYTES_PER_SAMPLE) - pcm_count
+        write_pcm_buffer(fill_loop_pcm_buffer(pad_samples), pad_samples, 'SDL_PutAudioStreamData pad') if pad_samples.positive?
       end
 
       def cushion_frames(frames)
@@ -421,8 +421,7 @@ module AstralVerse
         samples = [low_water_samples - (queued / BYTES_PER_SAMPLE), frame_samples * frames].min
         return if samples <= 0
 
-        data = loop_pcm(samples).pack('s<*')
-        SDL3.check(SDL3.put_audio_stream_data(@stream, FFI::MemoryPointer.from_string(data), data.bytesize), 'SDL_PutAudioStreamData cushion')
+        write_pcm_buffer(fill_loop_pcm_buffer(samples), samples, 'SDL_PutAudioStreamData cushion')
       end
 
       def queued_samples
@@ -464,21 +463,57 @@ module AstralVerse
         (@sample_rate / 60.0).round
       end
 
-      def loop_pcm(samples)
-        frame = @last_pcm_frame
-        return Array.new(samples, @last_pcm) if frame.empty?
+      def fill_pcm_buffer(samples, gain, count)
+        if @pcm_buffer.length != count
+          @pcm_buffer = Array.new(count, 0)
+          @pcm_pointer = FFI::MemoryPointer.new(:int16, [count, 1].max)
+        end
 
-        output = Array.new(samples)
+        scale = gain * 32_000.0
+        index = 0
+        while index < count
+          value = (samples[index] * scale).to_i
+          value = 32_767 if value > 32_767
+          value = -32_768 if value < -32_768
+          @pcm_buffer[index] = value
+          index += 1
+        end
+        if count.positive?
+          @last_pcm = @pcm_buffer[count - 1]
+          @last_pcm_frame = @pcm_buffer
+          @last_pcm_frame_length = count
+        end
+        @pcm_buffer
+      end
+
+      def fill_loop_pcm_buffer(samples)
+        if @pad_buffer.length != samples
+          @pad_buffer = Array.new(samples, 0)
+          @pad_pointer = FFI::MemoryPointer.new(:int16, [samples, 1].max)
+        end
+
+        frame = @last_pcm_frame
+        frame_length = @last_pcm_frame_length
+        if frame.empty? || frame_length.zero?
+          @pad_buffer.fill(@last_pcm)
+          return @pad_buffer
+        end
+
         index = 0
         frame_index = 0
-        frame_length = frame.length
         while index < samples
-          output[index] = frame[frame_index]
+          @pad_buffer[index] = frame[frame_index]
           frame_index += 1
           frame_index = 0 if frame_index >= frame_length
           index += 1
         end
-        output
+        @pad_buffer
+      end
+
+      def write_pcm_buffer(buffer, samples, label)
+        pointer = buffer.equal?(@pcm_buffer) ? @pcm_pointer : @pad_pointer
+        pointer.put_array_of_int16(0, buffer)
+        SDL3.check(SDL3.put_audio_stream_data(@stream, pointer, samples * BYTES_PER_SAMPLE), label)
       end
     end
   end

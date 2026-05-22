@@ -31,7 +31,7 @@ module MegaDrive
       filter_psg_samples!(psg_samples)
       ym_samples = render_ym_samples(count, sample_rate)
 
-      samples = mix_samples(psg_samples, ym_samples, count)
+      samples = mix_samples!(psg_samples, ym_samples, count)
       @paprium_audio&.mix_music_into(samples, count, sample_rate)
       samples
     end
@@ -58,7 +58,7 @@ module MegaDrive
       filter_psg_samples!(psg_samples)
       ym_samples = render_ym_job_samples(job[:ym2612], count, sample_rate)
 
-      mix_paprium_job_samples!(mix_samples(psg_samples, ym_samples, count), job[:paprium])
+      mix_paprium_job_samples!(mix_samples!(psg_samples, ym_samples, count), job[:paprium])
     end
 
     def filter_psg_samples!(samples)
@@ -97,17 +97,53 @@ module MegaDrive
       samples
     end
 
-    def mix_samples(psg_samples, ym_samples, count)
-      output = Array.new(count, 0.0)
+    def mix_samples!(psg_samples, ym_samples, count)
+      if ym_samples.length != count
+        return mix_resampled_ym_samples!(psg_samples, ym_samples, count)
+      end
+
       index = 0
       while index < count
         mixed = (ym_samples[index] * YM_GAIN) + (psg_samples[index] * PSG_GAIN)
         mixed = 1.0 if mixed > 1.0
         mixed = -1.0 if mixed < -1.0
-        output[index] = mixed
+        psg_samples[index] = mixed
         index += 1
       end
-      output
+      psg_samples
+    end
+
+    def mix_resampled_ym_samples!(psg_samples, ym_samples, count)
+      ym_length = ym_samples.length
+      if ym_length <= 1
+        ym = ym_samples[0] || 0.0
+        index = 0
+        while index < count
+          mixed = (ym * YM_GAIN) + (psg_samples[index] * PSG_GAIN)
+          mixed = 1.0 if mixed > 1.0
+          mixed = -1.0 if mixed < -1.0
+          psg_samples[index] = mixed
+          index += 1
+        end
+        return psg_samples
+      end
+
+      scale = (ym_length - 1).to_f / [count - 1, 1].max
+      index = 0
+      while index < count
+        position = index * scale
+        left = position.to_i
+        right = left + 1
+        right = left if right >= ym_length
+        fraction = position - left
+        ym = ym_samples[left] + (ym_samples[right] - ym_samples[left]) * fraction
+        mixed = (ym * YM_GAIN) + (psg_samples[index] * PSG_GAIN)
+        mixed = 1.0 if mixed > 1.0
+        mixed = -1.0 if mixed < -1.0
+        psg_samples[index] = mixed
+        index += 1
+      end
+      psg_samples
     end
 
     def render_ym_samples(count, sample_rate)
@@ -115,7 +151,7 @@ module MegaDrive
       return @ym2612.render_frame_mono_samples(count, @ym_frame_cycles, sample_rate) if ym_rate == sample_rate
 
       ym_count = [(count * ym_rate / sample_rate.to_f).ceil, 1].max
-      upsample(@ym2612.render_frame_mono_samples(ym_count, @ym_frame_cycles, ym_rate), count)
+      @ym2612.render_frame_mono_samples(ym_count, @ym_frame_cycles, ym_rate)
     end
 
     def render_ym_job_samples(job, count, sample_rate)
@@ -123,26 +159,7 @@ module MegaDrive
       return @ym2612.render_frame_mono_job(job, count, @ym_frame_cycles, sample_rate) if ym_rate == sample_rate
 
       ym_count = [(count * ym_rate / sample_rate.to_f).ceil, 1].max
-      upsample(@ym2612.render_frame_mono_job(job, ym_count, @ym_frame_cycles, ym_rate), count)
-    end
-
-    def upsample(samples, count)
-      return samples if samples.length == count
-      return Array.new(count, samples[0] || 0.0) if samples.length == 1
-
-      output = Array.new(count, 0.0)
-      scale = (samples.length - 1).to_f / [count - 1, 1].max
-      index = 0
-      while index < count
-        position = index * scale
-        left = position.to_i
-        right = left + 1
-        right = left if right >= samples.length
-        fraction = position - left
-        output[index] = samples[left] + (samples[right] - samples[left]) * fraction
-        index += 1
-      end
-      output
+      @ym2612.render_frame_mono_job(job, ym_count, @ym_frame_cycles, ym_rate)
     end
 
   end

@@ -138,6 +138,7 @@ module AstralVerse
         @browser_scroll = 0
         @status_flash = nil
         @status_flash_until = 0
+        reset_ui_profiler
       end
 
       def show
@@ -204,15 +205,24 @@ module AstralVerse
       end
 
       def loop_once
+        loop_started = profile_now_ms
+        section_started = loop_started
         poll_events
+        record_ui_profile(:events, profile_now_ms - section_started)
+        section_started = profile_now_ms
         update_game if @mode == :game
+        record_ui_profile(:update, profile_now_ms - section_started)
         now = now_ms
         frame_ms = current_frame_ms
         if now >= @next_draw
+          section_started = profile_now_ms
           draw
+          record_ui_profile(:draw_total, profile_now_ms - section_started)
           @next_draw += frame_ms
           @next_draw = now + frame_ms if @next_draw <= now - frame_ms
         end
+        record_ui_profile(:loop, profile_now_ms - loop_started)
+        publish_ui_profile_if_due
         now = now_ms
         sleep_ms = [[@next_draw - now, 1.0].min, 0.0].max
         SDL3.delay(sleep_ms.ceil)
@@ -470,17 +480,19 @@ module AstralVerse
         return unless delta >= frame_ms && @running
 
         if @stone.instance_variable_get(:@codex_present)
-          frames_due = (delta / frame_ms).floor
-          frames_due = MAX_CATCHUP_FRAMES if frames_due > MAX_CATCHUP_FRAMES
-          frames_due.times do
-            sync_game_input_state
-            @stone.gaze_frame
-            @audio_player&.update
-            @frame_count += 1
-            record_run_frame(now)
-          end
-          @last_vision += frames_due * frame_ms
-          @last_vision = now if @last_vision > now || now - @last_vision > frame_ms * MAX_CATCHUP_FRAMES
+          section_started = profile_now_ms
+          sync_game_input_state
+          record_ui_profile(:input_sync, profile_now_ms - section_started)
+          section_started = profile_now_ms
+          @stone.gaze_frame
+          record_ui_profile(:emu_frame, profile_now_ms - section_started)
+          section_started = profile_now_ms
+          @audio_player&.update
+          record_ui_profile(:audio_update, profile_now_ms - section_started)
+          @frame_count += 1
+          record_run_frame(now)
+          @last_vision += frame_ms
+          @last_vision = now if @last_vision > now || now - @last_vision > frame_ms
         else
           @running = false
         end
@@ -512,16 +524,22 @@ module AstralVerse
 
       def draw
         refresh_output_size
+        draw_started = profile_now_ms
         clear(*COLORS[:bg])
         @mode == :browser ? draw_browser : draw_game
+        record_ui_profile(:draw_body, profile_now_ms - draw_started)
+        present_started = profile_now_ms
         SDL3.render_present(@renderer)
+        record_ui_profile(:present, profile_now_ms - present_started)
       end
 
       def draw_game
         viewport = screen_viewport
         fill_rect(0, content_top, window_width, content_height, @fullscreen ? [0, 0, 0, 255] : COLORS[:bg])
         if @stone.instance_variable_get(:@codex_present) && @stone.vision_sprite.scrying_pool&.any?
+          upload_started = profile_now_ms
           update_screen_texture
+          record_ui_profile(:upload, profile_now_ms - upload_started)
           render_texture(@screen_texture, viewport[:x], viewport[:y], viewport[:w], viewport[:h])
           draw_scanlines(viewport) if @scanlines && @scanline_strength.positive?
           draw_sms_debug_mask(viewport) if @debug_mask
@@ -1402,6 +1420,42 @@ module AstralVerse
         Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
       end
 
+      def profile_now_ms
+        Process.clock_gettime(Process::CLOCK_MONOTONIC) * 1000.0
+      end
+
+      def reset_ui_profiler
+        @ui_profile_started = profile_now_ms
+        @ui_profile_sums = Hash.new(0.0)
+        @ui_profile_counts = Hash.new(0)
+        @ui_profile = {}
+      end
+
+      def record_ui_profile(key, elapsed_ms)
+        return unless @ui_profile_sums
+
+        @ui_profile_sums[key] += elapsed_ms
+        @ui_profile_counts[key] += 1
+      end
+
+      def publish_ui_profile_if_due
+        return unless @ui_profile_sums
+
+        now = profile_now_ms
+        return if now - @ui_profile_started < 500.0
+
+        profile = {}
+        @ui_profile_sums.each do |key, total|
+          count = @ui_profile_counts[key]
+          profile[key] = count.positive? ? total / count : 0.0
+        end
+        @ui_profile = profile
+        @ui_profile_sums.clear
+        @ui_profile_counts.clear
+        @ui_profile_started = now
+        @status_label_cache = nil
+      end
+
       def browser_scale
         Math.sqrt((window_width / 1024.0) * (window_height / 680.0)).clamp(0.72, 1.65)
       end
@@ -1455,8 +1509,20 @@ module AstralVerse
       def perf_label
         perf = @stone.emulator.perf_summary
         cap = 1000.0 / current_frame_ms
-        'run %.1f/%.0f fps head %.1f fps cpu %.1fms vdp %.1fms' %
+        label = 'run %.1f/%.0f fps head %.1f fps cpu %.1fms vdp %.1fms' %
           [@run_fps.to_f, cap, perf[:fps], perf[:avg_cpu_ms], perf[:avg_vdp_ms]]
+        return label if @ui_profile.empty?
+
+        '%s ui ev %.1f up %.1f inp %.1f emu %.1f aud %.1f tex %.1f draw %.1f pr %.1f' %
+          [label,
+           @ui_profile.fetch(:events, 0.0),
+           @ui_profile.fetch(:update, 0.0),
+           @ui_profile.fetch(:input_sync, 0.0),
+           @ui_profile.fetch(:emu_frame, 0.0),
+           @ui_profile.fetch(:audio_update, 0.0),
+           @ui_profile.fetch(:upload, 0.0),
+           @ui_profile.fetch(:draw_body, 0.0),
+           @ui_profile.fetch(:present, 0.0)]
       end
 
       def rom_file?(filename)

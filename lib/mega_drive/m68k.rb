@@ -114,6 +114,10 @@ module MegaDrive
       when 0x4E75
         @pc = pop_long & ADDRESS_MASK
         finish(16)
+      when 0x6600
+        fast_bcc_word(0x06)
+      when 0x51C8..0x51CF
+        fast_dbf(opcode & 0x07)
       when 0x2298
         fast_work_ram_move_a0_to_a1(SIZE_LONG, dest_postinc: false)
       when 0x3298
@@ -121,6 +125,13 @@ module MegaDrive
       when 0x33D8
         fast_work_ram_move_a0_to_a1(SIZE_WORD, dest_postinc: true)
       else
+        return fast_lea_d16_an(opcode) if (opcode & 0xF1F8) == 0x41E8
+        return fast_move_b_an_to_dn(opcode) if (opcode & 0xF1F8) == 0x1010
+        return fast_move_b_d16_an_to_dn(opcode) if (opcode & 0xF1F8) == 0x1028
+        return fast_move_dn_to_an_post(opcode, SIZE_WORD) if (opcode & 0xF1F8) == 0x30C0
+        return fast_move_dn_to_an_post(opcode, SIZE_LONG) if (opcode & 0xF1F8) == 0x20C0
+        return fast_add_dn_to_dn(opcode, SIZE_WORD) if (opcode & 0xF1F8) == 0xD040
+        return fast_add_dn_to_dn(opcode, SIZE_LONG) if (opcode & 0xF1F8) == 0xD080
         return trap(opcode & 0x0F) if (opcode & 0xFFF0) == 0x4E40
         return movep(opcode) if movep_opcode?(opcode)
         return bit_operation(opcode) if bit_operation?(opcode)
@@ -200,6 +211,55 @@ module MegaDrive
       source = read_ea(source_mode, source_reg, size)
       write_ea(dest_mode, dest_reg, size, source)
       set_nz_flags(source, size, keep_x: true) unless dest_mode == 1
+      finish(size == SIZE_LONG ? 8 : 4)
+    end
+
+    def fast_move_b_an_to_dn(opcode)
+      dest = (opcode >> 9) & 0x07
+      source = opcode & 0x07
+      value = read_byte(read_address_register(source))
+      @d[dest] = (@d[dest] & 0xFFFF_FF00) | value
+      set_nz_byte_flags(value)
+      finish(4)
+    end
+
+    def fast_move_b_d16_an_to_dn(opcode)
+      dest = (opcode >> 9) & 0x07
+      source = opcode & 0x07
+      displacement = sign_extend16(fetch_word)
+      value = read_byte((read_address_register(source) + displacement) & ADDRESS_MASK)
+      @d[dest] = (@d[dest] & 0xFFFF_FF00) | value
+      set_nz_byte_flags(value)
+      finish(4)
+    end
+
+    def fast_move_dn_to_an_post(opcode, size)
+      source = opcode & 0x07
+      dest = (opcode >> 9) & 0x07
+      address = read_address_register(dest)
+      value = @d[source]
+      if size == SIZE_LONG
+        write_long(address, value)
+        write_address_register(dest, address + 4)
+        set_nz_long_flags(value)
+        finish(8)
+      else
+        value &= 0xFFFF
+        write_word(address, value)
+        write_address_register(dest, address + 2)
+        set_nz_word_flags(value)
+        finish(4)
+      end
+    end
+
+    def fast_add_dn_to_dn(opcode, size)
+      dest = (opcode >> 9) & 0x07
+      source = opcode & 0x07
+      left = @d[dest]
+      right = @d[source]
+      result = left + right
+      write_data_register(dest, size, result)
+      set_add_sub_flags(left, right, result, size, subtract: false)
       finish(size == SIZE_LONG ? 8 : 4)
     end
 
@@ -879,6 +939,17 @@ module MegaDrive
       end
     end
 
+    def fast_bcc_word(condition)
+      base = @pc
+      displacement = sign_extend16(fetch_word)
+      if condition_true?(condition)
+        @pc = (base + displacement) & ADDRESS_MASK
+        finish(10)
+      else
+        finish(12)
+      end
+    end
+
     def short_busy_wait?(displacement, target)
       short_tst_busy_wait?(displacement, target) ||
         short_cmp_busy_wait?(displacement, target) ||
@@ -993,6 +1064,25 @@ module MegaDrive
       end
     end
 
+    def fast_dbf(reg)
+      displacement_base = @pc
+      displacement = sign_extend16(fetch_word)
+      counter = ((@d[reg] & 0xFFFF) - 1) & 0xFFFF
+      @d[reg] = (@d[reg] & 0xFFFF_0000) | counter
+      if counter != 0xFFFF
+        if displacement == -2
+          iterations = [counter + 1, BUSY_WAIT_BRANCH_CYCLES / 10].min
+          @d[reg] = (@d[reg] & 0xFFFF_0000) | ((counter - iterations + 1) & 0xFFFF)
+          @pc = displacement_base - 2
+          return finish(iterations * 10)
+        end
+        @pc = (displacement_base + displacement) & ADDRESS_MASK
+        finish(10)
+      else
+        finish(14)
+      end
+    end
+
     def scc(opcode)
       condition = (opcode >> 8) & 0x0F
       mode = (opcode >> 3) & 0x07
@@ -1014,6 +1104,13 @@ module MegaDrive
       mode = (opcode >> 3) & 0x07
       reg = opcode & 0x07
       write_address_register(dest, effective_address(mode, reg, SIZE_LONG))
+      finish(4)
+    end
+
+    def fast_lea_d16_an(opcode)
+      dest = (opcode >> 9) & 0x07
+      source = opcode & 0x07
+      write_address_register(dest, read_address_register(source) + sign_extend16(fetch_word))
       finish(4)
     end
 
@@ -1350,6 +1447,30 @@ module MegaDrive
       @ccr |= FLAG_N if negative?(value, size)
     end
 
+    def set_nz_byte_flags(value)
+      x = @ccr & FLAG_X
+      value &= 0xFF
+      @ccr = x
+      @ccr |= FLAG_Z if value.zero?
+      @ccr |= FLAG_N if (value & 0x80) != 0
+    end
+
+    def set_nz_word_flags(value)
+      x = @ccr & FLAG_X
+      value &= 0xFFFF
+      @ccr = x
+      @ccr |= FLAG_Z if value.zero?
+      @ccr |= FLAG_N if (value & 0x8000) != 0
+    end
+
+    def set_nz_long_flags(value)
+      x = @ccr & FLAG_X
+      value &= 0xFFFF_FFFF
+      @ccr = x
+      @ccr |= FLAG_Z if value.zero?
+      @ccr |= FLAG_N if (value & 0x8000_0000) != 0
+    end
+
     def set_add_sub_flags(left, right, result, size, subtract:, affect_x: true)
       x = @ccr & FLAG_X
       mask = mask_for(size)
@@ -1397,6 +1518,11 @@ module MegaDrive
       mask = (1 << bits) - 1
       value &= mask
       (value & sign) != 0 ? value - (1 << bits) : value
+    end
+
+    def sign_extend16(value)
+      value &= 0xFFFF
+      (value & 0x8000) != 0 ? value - 0x1_0000 : value
     end
 
     def read_byte(address)
