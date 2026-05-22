@@ -34,19 +34,24 @@ module MegaDrive
       @dma_active = false
       @status = 0x3400
       @irq_level = 0
+      @h_interrupt_pending = false
+      @v_interrupt_pending = false
+      @h_interrupt_counter = -1
       @render_version = 0
       @video_dirty = true
       @palette_version = -1
       @palette_rgba = nil
       @sharp_palette_rgba = nil
-      @pattern_row_cache = Array.new(0x800 * 8)
+      @pattern_row_cache = Array.new(0x800 * 16)
       @pattern_row_cache_packed = true
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
+      @interlace_field = 0
       @vblank_counter_pending = false
       @pending_vdp_writes = []
       @draining_dma = false
       @flushing_pending_vdp_writes = false
+      @line_snapshots = nil
     end
 
     def reset
@@ -66,19 +71,60 @@ module MegaDrive
       @dma_active = false
       @status = 0x3400
       @irq_level = 0
+      @h_interrupt_pending = false
+      @v_interrupt_pending = false
+      @h_interrupt_counter = -1
       @render_version = 0
       @video_dirty = true
       @palette_version = -1
       @palette_rgba = nil
       @sharp_palette_rgba = nil
-      @pattern_row_cache = Array.new(0x800 * 8)
+      @pattern_row_cache = Array.new(0x800 * 16)
       @pattern_row_cache_packed = true
       @sprite_pixel_cache = nil
       @sprite_occupancy_stamp = 0
+      @interlace_field = 0
       @vblank_counter_pending = false
       @pending_vdp_writes = []
       @draining_dma = false
       @flushing_pending_vdp_writes = false
+      @line_snapshots = nil
+    end
+
+    def begin_frame_snapshots
+      @line_snapshots = Array.new(VISIBLE_LINES)
+      @h_interrupt_counter = @registers[10].to_i
+      @h_interrupt_pending = false
+      update_irq_level
+    end
+
+    def capture_line(line)
+      return if line.negative? || line >= VISIBLE_LINES
+
+      @line_snapshots ||= Array.new(VISIBLE_LINES)
+      @line_snapshots[line] = {
+        registers: @registers.dup,
+        vsram: @vsram.dup,
+        sprite_table: interlace_mode_2? ? capture_sprite_table(@registers) : nil
+      }
+    end
+
+    def capture_current_line_snapshot
+      return unless @line_snapshots
+
+      capture_line(v_counter)
+    end
+
+    def tick_line_interrupt(line)
+      return if line.negative? || line >= VISIBLE_LINES
+
+      @h_interrupt_counter = @registers[10].to_i if line.zero? || @h_interrupt_counter.nil?
+      @h_interrupt_counter -= 1
+      return unless @h_interrupt_counter.negative?
+
+      @h_interrupt_pending = true if (@registers[0] & 0x10) != 0
+      @h_interrupt_counter = @registers[10].to_i
+      update_irq_level
     end
 
     def read_data
@@ -98,6 +144,9 @@ module MegaDrive
     def read_control
       @control_pending = false
       status = @status
+      if interlace_mode_2?
+        status = @interlace_field.to_i.zero? ? (status & ~0x0010) : (status | 0x0010)
+      end
       status = vblank? ? (status | 0x0008) : (status & ~0x0008)
       hblank_status? ? (status | 0x0004) : (status & ~0x0004)
     end
@@ -153,8 +202,12 @@ module MegaDrive
         if (value & 0xC000) == 0x8000
           register = (value >> 8) & 0x1F
           data = value & 0xFF
-          @video_dirty = true if @registers[register] != data
+          previous = @registers[register]
+          @video_dirty = true if previous != data
           @registers[register] = data
+          clear_mode_dependent_caches if register == 12 && previous != data
+          update_irq_level if register == 0 || register == 1
+          capture_current_line_snapshot if previous != data
           @control_pending = false
         else
           @mode_write = (value & 0x4000) != 0
@@ -192,23 +245,54 @@ module MegaDrive
     end
 
     def render_frame
+      advance_interlace_field
       return unless @video_dirty
 
       draw_scroll_planes
     end
 
+    def after_snapshot_load
+      @interlace_field ||= 0
+      clear_mode_dependent_caches
+      @video_dirty = true
+      self
+    end
+
     def request_vblank!
       @status |= 0x0080
       @vblank_counter_pending = true
-      @irq_level = 6
+      @v_interrupt_pending = true
+      update_irq_level
     end
 
     def end_vblank!
       @status &= ~0x0080
+      @vblank_counter_pending = false
+      @v_interrupt_pending = false
+      update_irq_level
     end
 
-    def acknowledge_interrupt(_level)
-      @irq_level = 0
+    def acknowledge_interrupt(level)
+      case level.to_i
+      when 6
+        @v_interrupt_pending = false
+      when 4
+        @h_interrupt_pending = false
+      else
+        @v_interrupt_pending = false if level.to_i >= 6
+        @h_interrupt_pending = false if level.to_i >= 4
+      end
+      update_irq_level
+    end
+
+    def update_irq_level
+      @irq_level = if @v_interrupt_pending && (@registers[1] & 0x20) != 0
+                     6
+                   elsif @h_interrupt_pending && (@registers[0] & 0x10) != 0
+                     4
+                   else
+                     0
+                   end
     end
 
     def palette_rgba
@@ -236,6 +320,7 @@ module MegaDrive
         value &= 0x07FF
         @video_dirty = true if @vsram[index] != value
         @vsram[index] = value
+        capture_current_line_snapshot
       else
         write_vram_word(@address, value)
       end
@@ -527,14 +612,21 @@ module MegaDrive
     end
 
     def draw_scroll_planes_fast
+      return draw_scroll_planes_interlace_mode_2_fast if interlace_mode_2?
+
       vram = @vram
       framebuffer = @framebuffer
       pattern_cache = @pattern_row_cache
       width = @screen_width
       height = @screen_height
       width_cells, height_cells = @plane_dimensions_cache
+      cell_height = tile_cell_height
+      row_mask = cell_height - 1
+      pattern_mask = pattern_index_mask
+      pattern_size = pattern_byte_size
+      key_shift = pattern_row_key_shift
       map_width = width_cells * 8
-      map_height = height_cells * 8
+      map_height = height_cells * cell_height
       map_width_mask = map_width - 1
       map_height_mask = map_height - 1
       plane_a = plane_a_base
@@ -560,19 +652,20 @@ module MegaDrive
           column = screen_x >> 4
           sy_a = sy_a_row || ((screen_y + v_scroll_a[column]) & map_height_mask)
           sx_a = (screen_x - ha) & map_width_mask
-          cell_y_a = sy_a >> 3
+          cell_y_a = sy_a / cell_height
           cell_x_a = sx_a >> 3
           address_a = (plane_a + ((2 * (cell_y_a * width_cells + cell_x_a)) & 0x1FFF)) & 0xFFFF
           entry_a = ((vram[address_a] || 0) << 8) | (vram[(address_a ^ 1) & 0xFFFF] || 0)
-          row_a = sy_a & 7
-          row_a = 7 - row_a if (entry_a & 0x1000) != 0
+          row_a = sy_a & row_mask
+          row_a = row_mask - row_a if (entry_a & 0x1000) != 0
           col_a = sx_a & 7
           hflip_a = (entry_a & 0x0800) != 0
           col_a = 7 - col_a if hflip_a
-          key_a = ((entry_a & 0x07FF) << 3) | row_a
+          pattern_a = entry_a & pattern_mask
+          key_a = (pattern_a << key_shift) | row_a
           packed_a = pattern_cache[key_a]
           unless packed_a
-            tile_a = (entry_a & 0x07FF) * 32 + row_a * 4
+            tile_a = (pattern_a & pattern_address_mask) * pattern_size + row_a * 4
             packed_a = ((vram[tile_a & 0xFFFF] || 0) << 24) |
                        ((vram[(tile_a + 1) & 0xFFFF] || 0) << 16) |
                        ((vram[(tile_a + 2) & 0xFFFF] || 0) << 8) |
@@ -614,19 +707,20 @@ module MegaDrive
 
           sy_b = sy_b_row || ((screen_y + v_scroll_b[column]) & map_height_mask)
           sx_b = (screen_x - hb) & map_width_mask
-          cell_y_b = sy_b >> 3
+          cell_y_b = sy_b / cell_height
           cell_x_b = sx_b >> 3
           address_b = (plane_b + ((2 * (cell_y_b * width_cells + cell_x_b)) & 0x1FFF)) & 0xFFFF
           entry_b = ((vram[address_b] || 0) << 8) | (vram[(address_b ^ 1) & 0xFFFF] || 0)
-          row_b = sy_b & 7
-          row_b = 7 - row_b if (entry_b & 0x1000) != 0
+          row_b = sy_b & row_mask
+          row_b = row_mask - row_b if (entry_b & 0x1000) != 0
           col_b = sx_b & 7
           hflip_b = (entry_b & 0x0800) != 0
           col_b = 7 - col_b if hflip_b
-          key_b = ((entry_b & 0x07FF) << 3) | row_b
+          pattern_b = entry_b & pattern_mask
+          key_b = (pattern_b << key_shift) | row_b
           packed_b = pattern_cache[key_b]
           unless packed_b
-            tile_b = (entry_b & 0x07FF) * 32 + row_b * 4
+            tile_b = (pattern_b & pattern_address_mask) * pattern_size + row_b * 4
             packed_b = ((vram[tile_b & 0xFFFF] || 0) << 24) |
                        ((vram[(tile_b + 1) & 0xFFFF] || 0) << 16) |
                        ((vram[(tile_b + 2) & 0xFFFF] || 0) << 8) |
@@ -700,6 +794,273 @@ module MegaDrive
       drew
     end
 
+    def draw_scroll_planes_interlace_mode_2_fast
+      vram = @vram
+      framebuffer = @framebuffer
+      pattern_cache = @pattern_row_cache
+      width = @screen_width
+      fallback_width_cells, fallback_height_cells = @plane_dimensions_cache
+      backdrop = color_index(@registers[7] & 0x3F)
+
+      scanline = 0
+      while scanline < VISIBLE_LINES
+        snapshot = line_snapshot(scanline)
+        registers = snapshot ? snapshot[:registers] : @registers
+        width_cells, height_cells = plane_dimensions_from(registers)
+        map_height_mask = (height_cells * 16) - 1
+        plane_a = plane_a_base_from(registers)
+        plane_b = plane_b_base_from(registers)
+        width_cells ||= fallback_width_cells
+        map_height_mask = (fallback_height_cells * 16) - 1 if map_height_mask.zero?
+        h_scroll_a = h_scroll_value_from(registers, :a, scanline)
+        h_scroll_b = h_scroll_value_from(registers, :b, scanline)
+        field = 0
+        while field < 2
+          output_y = (scanline << 1) | field
+          row_offset = output_y * width
+          x = 0
+          while x < width
+            framebuffer[row_offset + x] = backdrop
+            x += 1
+          end
+
+          draw_interlace_mode_2_scroll_line(
+            framebuffer, vram, pattern_cache, row_offset, width, width_cells, map_height_mask,
+            plane_b, h_scroll_b, :b, scanline, field, false, snapshot
+          )
+          draw_interlace_mode_2_scroll_line(
+            framebuffer, vram, pattern_cache, row_offset, width, width_cells, map_height_mask,
+            plane_a, h_scroll_a, :a, scanline, field, true, snapshot
+          )
+          field += 1
+        end
+        scanline += 1
+      end
+
+      draw_window_over_scroll_interlace_mode_2_fast(framebuffer, backdrop) if @window_enabled_cache
+      draw_sprites_over_scroll_interlace_mode_2_fast(framebuffer)
+      true
+    end
+
+    def draw_interlace_mode_2_scroll_line(framebuffer, vram, pattern_cache, row_offset, width, width_cells,
+                                          map_height_mask, name_base, h_scroll, plane, scanline, field, overlay, snapshot)
+      tile_pair_count = (width + 15) >> 4
+      h_scroll &= 0x03FF
+      scroll_offset = 16 - (h_scroll & 0x0F)
+      pair_offset = -(h_scroll >> 4)
+      plane_width_mask = width_cells - 1
+
+      pair = 0
+      while pair <= tile_pair_count
+        output_x = (pair << 4) - scroll_offset
+        vscroll_column = pair - 1
+        map_column = vscroll_column.negative? ? 0 : vscroll_column
+        tile_x = ((pair_offset + map_column) << 1) & plane_width_mask
+        view_y = interlace_mode_2_view_y(plane, scanline, field, vscroll_column, map_height_mask, snapshot)
+        row_word = (view_y >> 4) * width_cells
+        row = view_y & 0x0F
+
+        cell = 0
+        while cell < 2
+          cell_x = output_x + (cell << 3)
+          if cell_x < width && cell_x + 8 > 0
+            entry_address = (name_base + ((2 * (row_word + ((tile_x + cell) & plane_width_mask))) & 0x1FFF)) & 0xFFFF
+            entry = ((vram[entry_address] || 0) << 8) | (vram[(entry_address ^ 1) & 0xFFFF] || 0)
+            draw_interlace_mode_2_tile_pixels(framebuffer, vram, pattern_cache, row_offset, cell_x, width, entry, row, overlay)
+          end
+          cell += 1
+        end
+
+        pair += 1
+      end
+    end
+
+    def draw_interlace_mode_2_tile_pixels(framebuffer, vram, pattern_cache, row_offset, cell_x, width, entry, row, overlay)
+      effective_row = (entry & 0x1000) != 0 ? (15 - row) : row
+      pattern = entry & 0x07FF
+      key = (pattern << 4) | effective_row
+      packed = pattern_cache[key]
+      unless packed
+        tile_address = ((pattern & 0x03FF) * 64 + effective_row * 4) & 0xFFFF
+        packed = ((vram[tile_address] || 0) << 24) |
+                 ((vram[(tile_address + 1) & 0xFFFF] || 0) << 16) |
+                 ((vram[(tile_address + 2) & 0xFFFF] || 0) << 8) |
+                 (vram[(tile_address + 3) & 0xFFFF] || 0)
+        pattern_cache[key] = packed
+      end
+      return if packed.zero?
+
+      attr = ((entry & 0x8000) != 0 ? 0x100 : 0) | ((entry >> 9) & 0x30)
+      hflip = (entry & 0x0800) != 0
+      pixel = 0
+      while pixel < 8
+        x = cell_x + pixel
+        if x >= 0 && x < width
+          source_x = hflip ? (7 - pixel) : pixel
+          color = (packed >> ((7 - source_x) * 4)) & 0x0F
+          if color != 0
+            index = row_offset + x
+            current = framebuffer[index] || 0
+            if !overlay || (attr & 0x100) != 0 || (current & 0x100).zero?
+              framebuffer[index] = attr | color
+            end
+          end
+        end
+        pixel += 1
+      end
+    end
+
+    def draw_window_over_scroll_interlace_mode_2_fast(framebuffer, backdrop)
+      width = @screen_width
+      scanline = 0
+      while scanline < VISIBLE_LINES
+        snapshot = line_snapshot(scanline)
+        registers = snapshot ? snapshot[:registers] : @registers
+        field = 0
+        while field < 2
+          line_y = (scanline << 1) | field
+          range = window_range_from(registers, line_y)
+          if range && range[1] > range[0]
+            row_offset = line_y * width
+            screen_x = range[0]
+            while screen_x < range[1]
+              scroll_b = interlace_mode_2_scroll_pixel(:b, screen_x, scanline, field, snapshot)
+              scroll_a = window_pixel_from(registers, screen_x, line_y)
+              pixel = resolve_pixel(nil, scroll_a, scroll_b)
+              framebuffer[row_offset + screen_x] = pixel || backdrop
+              screen_x += 1
+            end
+          end
+          field += 1
+        end
+        scanline += 1
+      end
+    end
+
+    def interlace_mode_2_scroll_pixel(plane, screen_x, scanline, field, snapshot = nil)
+      registers = snapshot ? snapshot[:registers] : @registers
+      width_cells, height_cells = plane_dimensions_from(registers)
+      map_height_mask = (height_cells * 16) - 1
+      name_base = plane == :a ? plane_a_base_from(registers) : plane_b_base_from(registers)
+      h_scroll = h_scroll_value_from(registers, plane, scanline) & 0x03FF
+      fine_scroll = h_scroll & 0x0F
+      scroll_offset = 16 - fine_scroll
+      screen_pair = (screen_x + scroll_offset) >> 4
+      vscroll_column = screen_pair - 1
+      map_column = vscroll_column.negative? ? 0 : vscroll_column
+      pair_offset = -(h_scroll >> 4)
+      plane_width_mask = width_cells - 1
+      output_x = (screen_pair << 4) - scroll_offset
+      local_x = screen_x - output_x
+      tile_x = ((pair_offset + map_column) << 1) & plane_width_mask
+      cell = (local_x >> 3) & 1
+      view_y = interlace_mode_2_view_y(plane, scanline, field, vscroll_column, map_height_mask, snapshot)
+      row_word = (view_y >> 4) * width_cells
+      entry_address = (name_base + ((2 * (row_word + ((tile_x + cell) & plane_width_mask))) & 0x1FFF)) & 0xFFFF
+      entry = ((@vram[entry_address] || 0) << 8) | (@vram[(entry_address ^ 1) & 0xFFFF] || 0)
+      pixel = tile_pixel(entry, view_y & 0x0F, local_x & 7)
+      encode_pixel(entry, pixel)
+    end
+
+    def draw_sprites_over_scroll_interlace_mode_2_fast(framebuffer)
+      width = @screen_width
+      occupied = Array.new(width, 0)
+      stamp = 1
+      scanline = 0
+      while scanline < VISIBLE_LINES
+        snapshot = line_snapshot(scanline)
+        sprite_table = snapshot && snapshot[:sprite_table]
+        field = 0
+        while field < 2
+          output_y = (scanline << 1) | field
+          occupied.fill(0)
+          draw_interlace_mode_2_sprite_line(framebuffer, occupied, stamp, sprite_table, output_y)
+          stamp += 1
+          field += 1
+        end
+        scanline += 1
+      end
+    end
+
+    def draw_interlace_mode_2_sprite_line(framebuffer, occupied, stamp, sprite_table, output_y)
+      return unless sprite_table
+
+      pattern_cache = @pattern_row_cache
+      width = @screen_width
+      height = @screen_height
+      row_offset = output_y * width
+      sprite = 0
+      80.times do
+        offset = sprite << 3
+        y = (((sprite_table[offset] || 0) << 8) | (sprite_table[offset + 1] || 0)) & 0x03FF
+        size_link = ((sprite_table[offset + 2] || 0) << 8) | (sprite_table[offset + 3] || 0)
+        attr = ((sprite_table[offset + 4] || 0) << 8) | (sprite_table[offset + 5] || 0)
+        x = (((sprite_table[offset + 6] || 0) << 8) | (sprite_table[offset + 7] || 0)) & 0x01FF
+        screen_y = y - 0x100
+        screen_x = x - 0x80
+        h_cells = ((size_link >> 10) & 0x03) + 1
+        v_cells = ((size_link >> 8) & 0x03) + 1
+        sprite_height = v_cells << 4
+        if output_y >= screen_y && output_y < screen_y + sprite_height
+          draw_interlace_mode_2_sprite_pixels(framebuffer, occupied, stamp, pattern_cache, row_offset, screen_x,
+                                             output_y - screen_y, h_cells, v_cells, attr, width, height)
+        end
+        link = size_link & 0x7F
+        break if link.zero? || link == sprite
+
+        sprite = link
+      end
+    end
+
+    def draw_interlace_mode_2_sprite_pixels(framebuffer, occupied, stamp, pattern_cache, row_offset, screen_x, sy,
+                                            h_cells, v_cells, attr, width, height)
+      pattern = attr & 0x07FF
+      h_flip = (attr & 0x0800) != 0
+      v_flip = (attr & 0x1000) != 0
+      palette = (attr >> 9) & 0x30
+      priority = (attr & 0x8000) != 0
+      sprite_base = (priority ? 0x100 : 0) | palette
+      tile_y = sy >> 4
+      row = sy & 0x0F
+      tile_y = v_cells - 1 - tile_y if v_flip
+      row = 15 - row if v_flip
+      sprite_width = h_cells << 3
+      sx = screen_x.negative? ? -screen_x : 0
+      sx_end = [sprite_width, width - screen_x].min
+      return if row_offset.negative? || row_offset >= framebuffer.length || sx >= sx_end
+
+      while sx < sx_end
+        x = screen_x + sx
+        if occupied[x] != stamp
+          tile_x = sx >> 3
+          col = sx & 7
+          tile_x = h_cells - 1 - tile_x if h_flip
+          col = 7 - col if h_flip
+          tile = (pattern + tile_x * v_cells + tile_y) & 0x07FF
+          key = (tile << 4) | row
+          packed = pattern_cache[key]
+          unless packed
+            tile_address = ((tile & 0x03FF) * 64 + row * 4) & 0xFFFF
+            packed = ((@vram[tile_address] || 0) << 24) |
+                     ((@vram[(tile_address + 1) & 0xFFFF] || 0) << 16) |
+                     ((@vram[(tile_address + 2) & 0xFFFF] || 0) << 8) |
+                     (@vram[(tile_address + 3) & 0xFFFF] || 0)
+            pattern_cache[key] = packed
+          end
+          color = (packed >> ((7 - col) * 4)) & 0x0F
+          if color != 0
+            index = row_offset + x
+            current = framebuffer[index] || 0
+            if priority || (current & 0x100).zero?
+              framebuffer[index] = sprite_base | color
+            end
+            occupied[x] = stamp
+          end
+        end
+        sx += 1
+      end
+    end
+
     def draw_window_over_scroll_fast(framebuffer, backdrop)
       width = @screen_width
       height = @screen_height
@@ -740,6 +1101,7 @@ module MegaDrive
 
       base = sprite_table_base
       sprite = 0
+      sprite_y_base = interlace_mode_2? ? 0x100 : 0x80
       80.times do
         address = base + sprite * 8
         y = (((vram[address & 0xFFFF] || 0) << 8) | (vram[(address ^ 1) & 0xFFFF] || 0)) & 0x03FF
@@ -749,7 +1111,7 @@ module MegaDrive
         attr = ((vram[attr_address] || 0) << 8) | (vram[(attr_address ^ 1) & 0xFFFF] || 0)
         x_address = (address + 6) & 0xFFFF
         x = (((vram[x_address] || 0) << 8) | (vram[(x_address ^ 1) & 0xFFFF] || 0)) & 0x01FF
-        draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, x - 0x80, y - 0x80,
+        draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, x - 0x80, y - sprite_y_base,
           ((size_link >> 10) & 0x03) + 1, ((size_link >> 8) & 0x03) + 1, attr)
         link = size_link & 0x7F
         break if link.zero? || link == sprite
@@ -761,7 +1123,10 @@ module MegaDrive
     def draw_sprite_over_scroll_fast(framebuffer, occupied, stamp, screen_x, screen_y, h_cells, v_cells, attr)
       vram = @vram
       pattern_cache = @pattern_row_cache
-      pattern = attr & 0x07FF
+      pattern_mask = pattern_index_mask
+      pattern_size = pattern_byte_size
+      key_shift = pattern_row_key_shift
+      pattern = attr & pattern_mask
       h_flip = (attr & 0x0800) != 0
       v_flip = (attr & 0x1000) != 0
       palette = (attr >> 9) & 0x30
@@ -770,8 +1135,10 @@ module MegaDrive
       sprite_base = priority_bit | palette
       width = @screen_width
       height = @screen_height
+      cell_height = tile_cell_height
+      row_mask = cell_height - 1
 
-      sprite_height = v_cells * 8
+      sprite_height = v_cells * cell_height
       sprite_width = h_cells * 8
       sy = screen_y.negative? ? -screen_y : 0
       sy_end = [sprite_height, height - screen_y].min
@@ -782,10 +1149,10 @@ module MegaDrive
       while sy < sy_end
         y = screen_y + sy
         row_offset = y * width
-        tile_y = sy >> 3
-        row = sy & 7
+        tile_y = sy / cell_height
+        row = sy & row_mask
         tile_y = v_cells - 1 - tile_y if v_flip
-        row = 7 - row if v_flip
+        row = row_mask - row if v_flip
 
         sx = sx_start
         while sx < sx_end
@@ -802,11 +1169,11 @@ module MegaDrive
           end
           remaining = sx_end - sx
           run = remaining if remaining < run
-          tile = pattern + tile_x * v_cells + tile_y
-          key = (tile << 3) | row
+          tile = (pattern + tile_x * v_cells + tile_y) & pattern_mask
+          key = (tile << key_shift) | row
           packed = pattern_cache[key]
           unless packed
-            tile_address = (tile * 32 + row * 4) & 0xFFFF
+            tile_address = ((tile & pattern_address_mask) * pattern_size + row * 4) & 0xFFFF
             packed = ((vram[tile_address] || 0) << 24) |
                      ((vram[(tile_address + 1) & 0xFFFF] || 0) << 16) |
                      ((vram[(tile_address + 2) & 0xFFFF] || 0) << 8) |
@@ -845,12 +1212,13 @@ module MegaDrive
       h_scroll = plane == :a ? @h_scroll_a_cache[source_y] : @h_scroll_b_cache[source_y]
       v_scroll = plane == :a ? @v_scroll_a_cache[source_x / 16] : @v_scroll_b_cache[source_x / 16]
       width_cells, height_cells = @plane_dimensions_cache
-      scrolled_y = (source_y + v_scroll) % (height_cells * 8)
+      cell_height = tile_cell_height
+      scrolled_y = (source_y + v_scroll) % (height_cells * cell_height)
       scrolled_x = (source_x - h_scroll) % (width_cells * 8)
-      cell_y = scrolled_y / 8
+      cell_y = scrolled_y / cell_height
       cell_x = scrolled_x / 8
       entry = read_name_table_word(nametable_base, width_cells, cell_y, cell_x)
-      pixel = tile_pixel(entry, scrolled_y & 7, scrolled_x & 7)
+      pixel = tile_pixel(entry, scrolled_y & (cell_height - 1), scrolled_x & 7)
       encode_pixel(entry, pixel)
     end
 
@@ -858,9 +1226,18 @@ module MegaDrive
       return nil unless window_active?(source_x, source_y)
 
       h_cell = source_x / 8
-      v_cell = source_y / 8
+      cell_height = tile_cell_height
+      v_cell = source_y / cell_height
       entry = read_name_table_word(window_base, window_width_cells, v_cell, h_cell)
-      pixel = tile_pixel(entry, source_y & 7, source_x & 7)
+      pixel = tile_pixel(entry, source_y & (cell_height - 1), source_x & 7)
+      encode_pixel(entry, pixel)
+    end
+
+    def window_pixel_from(registers, source_x, source_y)
+      h_cell = source_x / 8
+      v_cell = source_y >> 4
+      entry = read_name_table_word(window_base_from(registers), window_width_cells_from(registers), v_cell, h_cell)
+      pixel = tile_pixel(entry, source_y & 0x0F, source_x & 7)
       encode_pixel(entry, pixel)
     end
 
@@ -931,6 +1308,7 @@ module MegaDrive
       end
       base = sprite_table_base
       sprite = 0
+      sprite_y_base = interlace_mode_2? ? 0x100 : 0x80
       80.times do
         address = base + sprite * 8
         y = read_vram_word(address) & 0x03FF
@@ -940,7 +1318,7 @@ module MegaDrive
         h_cells = (((size_link >> 10) & 0x03) + 1)
         v_cells = (((size_link >> 8) & 0x03) + 1)
         link = size_link & 0x7F
-        draw_sprite(pixels, x - 0x80, y - 0x80, h_cells, v_cells, attr)
+        draw_sprite(pixels, x - 0x80, y - sprite_y_base, h_cells, v_cells, attr)
         break if link.zero? || link == sprite
 
         sprite = link
@@ -954,15 +1332,17 @@ module MegaDrive
       v_flip = (attr & 0x1000) != 0
       palette = (attr >> 9) & 0x30
       priority = (attr & 0x8000) != 0
+      cell_height = tile_cell_height
+      row_mask = cell_height - 1
 
-      (v_cells * 8).times do |sy|
+      (v_cells * cell_height).times do |sy|
         y = screen_y + sy
         next if y.negative? || y >= @screen_height
 
-        tile_y = sy / 8
-        row = sy & 7
+        tile_y = sy / cell_height
+        row = sy & row_mask
         tile_y = v_cells - 1 - tile_y if v_flip
-        row = 7 - row if v_flip
+        row = row_mask - row if v_flip
 
         (h_cells * 8).times do |sx|
           x = screen_x + sx
@@ -983,8 +1363,8 @@ module MegaDrive
     end
 
     def tile_pixel(entry, row, column)
-      pattern = entry & 0x07FF
-      row = 7 - row if (entry & 0x1000) != 0
+      pattern = entry & pattern_index_mask
+      row = tile_row_mask - row if (entry & 0x1000) != 0
       column = 7 - column if (entry & 0x0800) != 0
       (pattern_row(pattern, row) >> ((7 - column) * 4)) & 0x0F
     end
@@ -994,11 +1374,13 @@ module MegaDrive
     end
 
     def pattern_row(pattern, row)
-      key = (pattern << 3) | row
+      pattern &= pattern_index_mask
+      row &= tile_row_mask
+      key = (pattern << pattern_row_key_shift) | row
       cached = @pattern_row_cache[key]
       return cached if cached
 
-      address = (pattern * 32 + row * 4) & 0xFFFF
+      address = ((pattern & pattern_address_mask) * pattern_byte_size + row * 4) & 0xFFFF
       b0 = @vram[address] || 0
       b1 = @vram[(address + 1) & 0xFFFF] || 0
       b2 = @vram[(address + 2) & 0xFFFF] || 0
@@ -1028,8 +1410,9 @@ module MegaDrive
       @v_scroll_a_single_cache = single_value(@v_scroll_a_cache)
       @v_scroll_b_single_cache = single_value(@v_scroll_b_cache)
       prepare_window_cache(height, width)
-      unless @pattern_row_cache_packed && @pattern_row_cache&.length == 0x800 * 8
-        @pattern_row_cache = Array.new(0x800 * 8)
+      cache_size = pattern_row_cache_size
+      unless @pattern_row_cache_packed && @pattern_row_cache&.length == cache_size
+        @pattern_row_cache = Array.new(cache_size)
         @pattern_row_cache_packed = true
       end
     end
@@ -1171,7 +1554,7 @@ module MegaDrive
 
     def h_scroll_value(plane, source_y)
       hscroll_base = (@registers[13] & 0x3F) << 10
-      line = source_y & 0xFF
+      line = (interlace_mode_2? ? (source_y >> 1) : source_y) & 0xFF
       offset = case @registers[11] & 0x03
                when 0 then 0
                when 2 then 32 * (line / 8)
@@ -1194,6 +1577,111 @@ module MegaDrive
       (@vsram[index] || 0) & 0x03FF
     end
 
+    def interlace_mode_2_view_y(plane, scanline, field, column, map_height_mask, snapshot = nil)
+      line_y = ((scanline << 1) | field) & 0x07FF
+      registers = snapshot ? snapshot[:registers] : @registers
+      vsram = snapshot ? snapshot[:vsram] : @vsram
+      vscroll = if (registers[11] & 0x04).zero?
+                  vsram[plane == :a ? 0 : 1] || 0
+                elsif column.negative?
+                  interlace_mode_2_negative_column_vscroll(vsram, registers)
+                else
+                  index = column
+                  index &= 0x0F if active_width_from(registers) != 320
+                  index %= VSRAM_SIZE if index >= VSRAM_SIZE
+                  vsram[(index << 1) + (plane == :a ? 0 : 1)] || 0
+                end
+      (line_y + (vscroll & 0x07FF)) & map_height_mask
+    end
+
+    def interlace_mode_2_negative_column_vscroll(vsram = @vsram, registers = @registers)
+      return 0 unless active_width_from(registers) == 320
+
+      word_26 = vsram[0x26] || 0
+      word_27 = vsram[0x27] || 0
+      high = ((word_26 >> 8) & 0xFF) & ((word_27 >> 8) & 0xFF)
+      low = (word_26 & 0xFF) & (word_27 & 0xFF)
+      ((high << 8) | low) & 0x07FF
+    end
+
+    def line_snapshot(line)
+      snapshot = @line_snapshots && @line_snapshots[line]
+      snapshot || (@line_snapshots && @line_snapshots.compact.last)
+    end
+
+    def h_scroll_value_from(registers, plane, source_y)
+      hscroll_base = (registers[13] & 0x3F) << 10
+      line = source_y & 0xFF
+      offset = case registers[11] & 0x03
+               when 0 then 0
+               when 2 then 32 * (line / 8)
+               when 3 then 4 * line
+               else 4 * (line & 0x07)
+               end
+      read_vram_word(hscroll_base + offset + (plane == :a ? 0 : 2)) & 0x03FF
+    end
+
+    def plane_a_base_from(registers)
+      (registers[2] & 0x38) << 10
+    end
+
+    def plane_b_base_from(registers)
+      (registers[4] & 0x07) << 13
+    end
+
+    def window_base_from(registers)
+      base = (registers[3] & 0x3E) << 10
+      active_width_from(registers) == 320 ? (base & 0xF000) : (base & 0xF800)
+    end
+
+    def active_width_from(registers)
+      ((registers[12] & 0x81) != 0) ? 320 : 256
+    end
+
+    def window_width_cells_from(registers)
+      active_width_from(registers) == 320 ? 64 : 32
+    end
+
+    def window_range_from(registers, source_y)
+      width = active_width_from(registers)
+      x = (registers[17] & 0x1F) << 4
+      y = registers[18] & 0x1F
+      in_vertical = if (registers[18] & 0x80) != 0
+                      (source_y >> 4) >= y
+                    else
+                      (source_y >> 4) < y
+                    end
+      return [0, width] if in_vertical
+
+      if (registers[17] & 0x80) != 0
+        [x, width]
+      else
+        [0, x]
+      end
+    end
+
+    def plane_dimensions_from(registers)
+      case registers[16] & 0x33
+      when 0x00 then [32, 32]
+      when 0x01 then [64, 32]
+      when 0x02 then [64, 1]
+      when 0x03 then [128, 32]
+      when 0x10 then [32, 64]
+      when 0x11 then [64, 64]
+      when 0x12 then [64, 1]
+      when 0x13 then [128, 32]
+      when 0x20 then [32, 64]
+      when 0x21 then [64, 64]
+      when 0x22 then [64, 1]
+      when 0x23 then [128, 64]
+      when 0x30 then [32, 128]
+      when 0x31 then [64, 64]
+      when 0x32 then [64, 1]
+      when 0x33 then [128, 128]
+      else [32, 32]
+      end
+    end
+
     def plane_a_base
       (@registers[2] & 0x38) << 10
     end
@@ -1212,12 +1700,74 @@ module MegaDrive
       active_width == 320 ? (base & 0xFC00) : base
     end
 
+    def interlace_mode_2?
+      (@registers[12] & 0x06) == 0x06
+    end
+
+    def tile_cell_height
+      interlace_mode_2? ? 16 : 8
+    end
+
+    def tile_row_mask
+      tile_cell_height - 1
+    end
+
+    def pattern_index_mask
+      0x07FF
+    end
+
+    def pattern_address_mask
+      interlace_mode_2? ? 0x03FF : 0x07FF
+    end
+
+    def pattern_byte_size
+      interlace_mode_2? ? 64 : 32
+    end
+
+    def pattern_row_key_shift
+      interlace_mode_2? ? 4 : 3
+    end
+
+    def pattern_row_cache_size
+      interlace_mode_2? ? (0x800 * 16) : (0x800 * 8)
+    end
+
+    def clear_mode_dependent_caches
+      @pattern_row_cache = Array.new(pattern_row_cache_size)
+      @sprite_pixel_cache = nil
+      @sprite_occupied_cache = nil
+      @source_x_cache = nil
+      @source_y_cache = nil
+    end
+
+    def capture_sprite_table(registers)
+      base = (registers[5] & 0x7F) << 9
+      base &= 0xFC00 if active_width_from(registers) == 320
+      table = Array.new(80 * 8, 0)
+      index = 0
+      while index < table.length
+        table[index] = @vram[(base + index) & 0xFFFF] || 0
+        index += 1
+      end
+      table
+    end
+
+    def advance_interlace_field
+      unless interlace_mode_2?
+        @interlace_field = 0
+        return
+      end
+
+      @interlace_field = (@interlace_field.to_i ^ 1) & 0x01
+      @status = @interlace_field.zero? ? (@status & ~0x0010) : (@status | 0x0010)
+    end
+
     def active_width
       ((@registers[12] & 0x81) != 0) ? 320 : 256
     end
 
     def active_height
-      224
+      interlace_mode_2? ? 448 : 224
     end
 
     def display_enabled?
@@ -1231,10 +1781,11 @@ module MegaDrive
     def window_range(source_y)
       x = (@registers[17] & 0x1F) * 16
       y = @registers[18] & 0x1F
+      cell_height = tile_cell_height
       in_vertical = if (@registers[18] & 0x80) != 0
-                      (source_y / 8) >= y
+                      (source_y / cell_height) >= y
                     else
-                      (source_y / 8) < y
+                      (source_y / cell_height) < y
                     end
       return [0, active_width] if in_vertical
 

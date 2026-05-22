@@ -634,6 +634,29 @@ RSpec.describe 'Mega Drive audio' do
     expect(vdp.framebuffer[0] & 0x0F).to eq(1)
   end
 
+  it 'renders interlace mode 2 scroll tiles as 8x16 patterns' do
+    vdp = MegaDrive::VDP.new
+
+    vdp.write_control(0x8144) # display enable
+    vdp.write_control(0x8200 | 0x30) # Scroll A at C000
+    vdp.write_control(0x8400) # Scroll B at 0000
+    vdp.write_control(0x8C87) # H40, interlace mode 2
+
+    vdp.write_control(0x4000 | 0x0060) # tile 1, row 8 in 8x16 mode
+    vdp.write_control(0x0000)
+    2.times { vdp.write_data(0x2222) }
+
+    vdp.write_control(0x4000) # Scroll A nametable tile 1 at C000
+    vdp.write_control(0x0003)
+    vdp.write_data(0x0001)
+
+    vdp.render_frame
+
+    expect(vdp.screen_width).to eq(320)
+    expect(vdp.screen_height).to eq(448)
+    expect(vdp.framebuffer[8 * 320] & 0x0F).to eq(2)
+  end
+
   it 'binds the UI-visible framebuffer to the Mega Drive VDP' do
     emulator = MegaDrive::Emulator.new
 

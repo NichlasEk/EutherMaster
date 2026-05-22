@@ -102,6 +102,8 @@ module MegaDrive
       audio_cycles_per_frame = current_z80_frame_cycles
       @audio.begin_frame
       @bus.begin_frame
+      @vdp.begin_frame_snapshots if @vdp.respond_to?(:begin_frame_snapshots)
+      @vdp.capture_line(0) if @vdp.respond_to?(:capture_line)
       while cycles < cycles_per_frame
         begin
           current_line = [cycles / LINE_M68K_CYCLES, lines_per_frame - 1].min
@@ -128,6 +130,7 @@ module MegaDrive
         end
 
         while next_line <= lines_per_frame && cycles >= next_line * LINE_M68K_CYCLES
+          @vdp.tick_line_interrupt(next_line - 1) if @vdp.respond_to?(:tick_line_interrupt)
           line_m68k_cycle = next_line * LINE_M68K_CYCLES
           if !vblank_requested && next_line >= VBLANK_LINE
             @bus.frame_cycle = next_line * line_z80_cycles
@@ -138,11 +141,13 @@ module MegaDrive
 
           @bus.frame_cycle = next_line * line_z80_cycles
           @bus.ym_frame_cycle = line_m68k_cycle
+          @vdp.capture_line(next_line) if @vdp.respond_to?(:capture_line)
           next_line += 1
         end
       end
 
       while next_line <= lines_per_frame
+        @vdp.tick_line_interrupt(next_line - 1) if @vdp.respond_to?(:tick_line_interrupt)
         line_m68k_cycle = next_line * LINE_M68K_CYCLES
         if !vblank_requested && next_line >= VBLANK_LINE
           @bus.frame_cycle = next_line * line_z80_cycles
@@ -152,6 +157,7 @@ module MegaDrive
         end
         @bus.frame_cycle = next_line * line_z80_cycles
         @bus.ym_frame_cycle = line_m68k_cycle
+        @vdp.capture_line(next_line) if @vdp.respond_to?(:capture_line)
         next_line += 1
       end
       @bus.frame_cycle = audio_cycles_per_frame
@@ -168,6 +174,7 @@ module MegaDrive
       cpu_finished = monotonic_time
       @vdp.end_vblank!
       @vdp.render_frame
+      recover_sonic2_interlace_wait!
       frame_finished = monotonic_time
       @frame_count += 1
       @render_version += 1
@@ -237,6 +244,8 @@ module MegaDrive
       @bus.reset_cartridge_override if @bus.respond_to?(:reset_cartridge_override)
       @audio.paprium_audio = @bus.cartridge_override if @audio.respond_to?(:paprium_audio=)
       @vdp.bus = @bus
+      @vdp.after_snapshot_load if @vdp.respond_to?(:after_snapshot_load)
+      recover_sonic2_interlace_wait!
       apply_region_configuration
       self
     end
@@ -244,6 +253,24 @@ module MegaDrive
     def reset_perf
       @perf = { frames: 0, cpu_seconds: 0.0, vdp_seconds: 0.0, frame_seconds: 0.0, cpu_steps: 0,
                 last_frame_ms: 0.0, last_cpu_ms: 0.0, last_vdp_ms: 0.0, last_cpu_steps: 0 }
+    end
+
+    def recover_sonic2_interlace_wait!
+      return unless sonic2_rom?
+      return unless @vdp.respond_to?(:send) && @vdp.send(:interlace_mode_2?)
+
+      pc = @cpu.pc & 0x00FF_FFFF
+      return unless pc == 0x016A04 || pc == 0x016A08
+      return if @bus.read_word(0x00FF_F644).zero?
+
+      @bus.write_word(0x00FF_F644, 0)
+    end
+
+    def sonic2_rom?
+      name = @rom_info&.respond_to?(:name) ? @rom_info.name.to_s.downcase : ''
+      path = @rom_info&.respond_to?(:path) ? @rom_info.path.to_s.downcase : ''
+      identity = "#{name} #{path}"
+      identity.include?('sonic2') || identity.include?('sonic 2') || identity.include?('sonic the hedgehog 2')
     end
 
     def perf_summary
